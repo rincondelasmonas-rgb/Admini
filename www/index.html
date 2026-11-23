@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#F2F5F7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#08090A" media="(prefers-color-scheme: dark)">
+  <title>Archivos</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <header class="topbar">
+      <div id="tbNormal" class="tb-row">
+        <div class="tb-title">
+          <h1>Archivos</h1>
+          <p id="storageText" class="tb-sub" aria-live="polite"></p>
+        </div>
+        <button id="btnSearch" type="button" class="icon-btn" aria-label="Buscar" data-icon="search"></button>
+      </div>
+      <div id="tbSelect" class="tb-row hidden">
+        <button id="btnSelClose" type="button" class="icon-btn" aria-label="Salir de la selección" data-icon="x"></button>
+        <div id="selCount" class="tb-title sel-count" aria-live="polite"></div>
+        <button id="btnSelAll" type="button" class="icon-btn" aria-label="Seleccionar todo" data-icon="checkall"></button>
+      </div>
+      <div id="searchRow" class="search-row hidden">
+        <span class="search-ic" data-icon="search"></span>
+        <input id="searchInput" class="search-input" type="search" inputmode="search" placeholder="Buscar por nombre" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Buscar por nombre">
+        <button id="btnSearchClear" type="button" class="icon-btn small" aria-label="Borrar búsqueda" data-icon="x"></button>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="Secciones">
+      <button id="tabAll" type="button" role="tab" class="tab" data-tab="all" aria-selected="true">Todos <span id="cntAll" class="count">0</span></button>
+      <button id="tabTrash" type="button" role="tab" class="tab" data-tab="trash" aria-selected="false">Basurero <span id="cntTrash" class="count">0</span></button>
+    </nav>
+
+    <div class="toolbar">
+      <div class="seg" role="radiogroup" aria-label="Ordenar por">
+        <button type="button" role="radio" class="seg-btn" data-sort="recent" aria-checked="true">Recientes</button>
+        <button type="button" role="radio" class="seg-btn" data-sort="name" aria-checked="false">Nombre</button>
+        <button type="button" role="radio" class="seg-btn" data-sort="size" aria-checked="false">Tamaño</button>
+      </div>
+    </div>
+
+    <div id="trashBanner" class="trash-banner hidden">
+      <span>Los archivos se eliminan solos a los 30 días.</span>
+      <button id="btnEmptyTrash" type="button" class="btn text danger-text">Vaciar</button>
+    </div>
+
+    <main id="content" class="content">
+      <ul id="list" class="list" aria-live="polite"></ul>
+      <div id="empty" class="empty hidden"></div>
+    </main>
+
+    <button id="fab" type="button" class="fab"><span data-icon="plus"></span><span>Subir</span></button>
+    <nav id="selbar" class="selbar hidden" aria-label="Acciones de selección"></nav>
+  </div>
+
+  <section id="preview" class="preview hidden" aria-label="Vista previa">
+    <header class="pv-top">
+      <button id="pvBack" type="button" class="icon-btn" aria-label="Cerrar vista previa" data-icon="back"></button>
+      <div class="pv-title">
+        <div id="pvName" class="pv-name"></div>
+        <div id="pvInfo" class="pv-info"></div>
+      </div>
+    </header>
+    <div id="pvBody" class="pv-body"></div>
+    <button id="pvPrev" type="button" class="pv-nav prev" aria-label="Anterior" data-icon="left"></button>
+    <button id="pvNext" type="button" class="pv-nav next" aria-label="Siguiente" data-icon="right"></button>
+    <nav id="pvActions" class="pv-actions" aria-label="Acciones"></nav>
+  </section>
+
+  <div id="overlay-root"></div>
+  <div id="snack" class="snack hidden" role="status" aria-live="polite"></div>
+  <input id="picker" type="file" multiple hidden>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

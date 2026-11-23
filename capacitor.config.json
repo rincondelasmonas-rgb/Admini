@@ -1,0 +1,8 @@
+{
+  "appId": "com.luismartinezprog.archivos",
+  "appName": "Archivos",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  }
+}

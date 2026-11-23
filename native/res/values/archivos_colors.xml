@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="archivos_bg">#F2F5F7</color>
+    <color name="archivos_icon_bg">#4F6BED</color>
+    <bool name="archivos_light_bars">true</bool>
+</resources>

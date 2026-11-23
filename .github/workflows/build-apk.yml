@@ -1,0 +1,117 @@
+name: Compilar APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # necesario para publicar el APK en Releases
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      # Secretos de la firma (opcionales). Si faltan, se compila con firma debug.
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Android SDK (plataforma 34, build-tools 34.0.0)
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 11076708
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+
+      - name: Instalar dependencias
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Probar la lógica
+        run: npm test
+
+      - name: Calcular versión y modo de firma
+        run: |
+          BASE=$(node -p "require('./package.json').version.split('.').slice(0,2).join('.')")
+          echo "VERSION_NAME=${BASE}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "SIGNED=true" >> "$GITHUB_ENV"
+            echo "Firma: keystore fija (release)"
+          else
+            echo "SIGNED=false" >> "$GITHUB_ENV"
+            echo "::warning::Faltan secretos de firma: se compila con firma debug (no se podrá actualizar encima de un APK firmado con la keystore fija)."
+          fi
+
+      - name: Crear proyecto Android
+        run: |
+          npx cap add android
+          node scripts/prepare-android.mjs
+          npx cap sync android
+
+      - name: Compilar APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          if [ "$SIGNED" = "true" ]; then
+            ./gradlew --no-daemon assembleRelease
+          else
+            ./gradlew --no-daemon assembleDebug
+          fi
+
+      - name: Preparar APK
+        run: |
+          mkdir -p dist
+          if [ "$SIGNED" = "true" ]; then
+            SRC=android/app/build/outputs/apk/release/app-release.apk
+            SUFFIX=firmado
+          else
+            SRC=android/app/build/outputs/apk/debug/app-debug.apk
+            SUFFIX=debug
+          fi
+          OUT="dist/Archivos-${VERSION_NAME}-${SUFFIX}.apk"
+          cp "$SRC" "$OUT"
+          echo "APK_PATH=$OUT" >> "$GITHUB_ENV"
+          echo "APK_SUFFIX=$SUFFIX" >> "$GITHUB_ENV"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "$OUT" | grep -E "SHA-256|Signer #1 certificate DN" || true
+
+      - name: Subir artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Archivos-${{ env.VERSION_NAME }}-${{ env.APK_SUFFIX }}
+          path: ${{ env.APK_PATH }}
+          if-no-files-found: error
+
+      - name: Publicar en GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION_NAME }}
+          name: Archivos ${{ env.VERSION_NAME }}
+          files: ${{ env.APK_PATH }}
+          make_latest: true
+          body: |
+            APK de **Archivos** ${{ env.VERSION_NAME }} (versionCode ${{ env.VERSION_CODE }}).
+            Firma: **${{ env.APK_SUFFIX }}**${{ env.SIGNED == 'false' && ' — compilado sin keystore fija; configura los secretos para poder actualizar encima.' || '' }}
