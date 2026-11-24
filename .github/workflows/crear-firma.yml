@@ -1,0 +1,73 @@
+name: Crear firma (una sola vez)
+
+# Crea la clave con la que se firman todos los APK y la guarda como los 4 secretos que usa "Compilar APK".
+# Así cada versión nueva se instala encima de la anterior sin desinstalar.
+# La clave y su contraseña nunca se muestran: se generan aquí, se enmascaran y van directo a los secretos.
+#
+# Antes de ejecutarlo hace falta el secreto ADMIN_TOKEN (ver README, sección "Firma fija").
+
+on:
+  workflow_dispatch:
+    inputs:
+      reemplazar:
+        description: 'Déjalo en "no". Escribe SI solo si ya existe una firma y quieres cambiarla (habrá que desinstalar la app una vez más)'
+        required: false
+        default: 'no'
+
+permissions:
+  contents: read
+
+jobs:
+  crear:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+      REPO: ${{ github.repository }}
+      REEMPLAZAR: ${{ inputs.reemplazar }}
+    steps:
+      - name: Comprobar el token
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Falta el secreto ADMIN_TOKEN. Crea el token y guárdalo como secreto con ese nombre (README, sección Firma fija)."
+            exit 1
+          fi
+          gh secret list --repo "$REPO" > /dev/null || { echo "::error::El token no puede leer los secretos de este repositorio. Revisa que tenga el permiso Secrets: Read and write."; exit 1; }
+
+      - name: Evitar reemplazar una firma que ya existe
+        run: |
+          if gh secret list --repo "$REPO" --json name -q '.[].name' | grep -qx 'ANDROID_KEYSTORE_BASE64'; then
+            if [ "$REEMPLAZAR" != "SI" ]; then
+              echo "::error::Ya existe una firma. No se cambió nada (cambiarla obliga a desinstalar la app). Si de verdad quieres cambiarla, ejecuta de nuevo y escribe SI."
+              exit 1
+            fi
+            echo "::warning::Se va a reemplazar la firma existente."
+          fi
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Crear la clave y guardarla como secretos
+        run: |
+          set -euo pipefail
+          PW=$(openssl rand -hex 16)
+          echo "::add-mask::$PW"
+          keytool -genkeypair -keystore "$RUNNER_TEMP/archivos-release.jks" -storetype PKCS12 \
+            -alias archivos -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "$PW" -keypass "$PW" -dname "CN=Archivos, O=Luis Martinez, C=CO"
+          B64=$(base64 -w0 "$RUNNER_TEMP/archivos-release.jks")
+          echo "::add-mask::$B64"
+          gh secret set ANDROID_KEYSTORE_BASE64 --repo "$REPO" --body "$B64"
+          gh secret set KEYSTORE_PASSWORD --repo "$REPO" --body "$PW"
+          gh secret set KEY_ALIAS --repo "$REPO" --body "archivos"
+          gh secret set KEY_PASSWORD --repo "$REPO" --body "$PW"
+          rm -f "$RUNNER_TEMP/archivos-release.jks"
+          echo "Listo: se guardaron los 4 secretos de firma."
+
+      - name: Confirmar
+        run: |
+          gh secret list --repo "$REPO"
+          echo "Ahora ejecuta 'Compilar APK' (o haz un cambio en main): saldrá firmado con la clave fija."

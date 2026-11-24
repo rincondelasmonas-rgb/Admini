@@ -30,7 +30,16 @@ Cada `push` a `main` ejecuta `.github/workflows/build-apk.yml`: pruebas (`npm te
 Descárgalo en **Actions → última ejecución → Artifacts** o en **Releases**. La versión es `2.0.<número de ejecución>`.
 
 ### Actualizar encima de una instalación previa
-Sin keystore propia, cada compilación se firma con una clave debug distinta y Android no deja instalar encima: **desinstala la anterior primero**. Para poder actualizar, crea una keystore y guárdala como secretos del repositorio: `ANDROID_KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD` (el script `prepare-android.mjs` la usa si existe `KEYSTORE_FILE`).
+Sin keystore propia, cada compilación se firma con una clave debug distinta y Android no deja instalar encima: **desinstala la anterior primero**. Para poder actualizar, hace falta una firma fija guardada como secretos del repositorio: `ANDROID_KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD` (el script `prepare-android.mjs` la usa si existe `KEYSTORE_FILE`).
+
+#### Firma fija, solo desde GitHub (sin PC)
+1. En GitHub: foto de perfil → **Settings** → **Developer settings** → **Personal access tokens** → **Fine-grained tokens** → **Generate new token**. Ponle un nombre (por ejemplo `firma-archivos`), vencimiento de 7 días, en *Repository access* elige **Only select repositories** → `Admini`, y en *Repository permissions* pon **Secrets: Read and write**. Genera el token y cópialo.
+2. En el repositorio: **Settings** → **Secrets and variables** → **Actions** → **New repository secret**. Nombre `ADMIN_TOKEN`, valor el token.
+3. En la pestaña **Actions** → **Crear firma (una sola vez)** → **Run workflow** (deja el campo en `no`).
+4. Cuando termine en verde, **borra** el secreto `ADMIN_TOKEN` y el token (ya no hacen falta).
+5. Ejecuta **Compilar APK**. Esa primera vez desinstala la app anterior; desde ahí todas las versiones se instalan encima.
+
+La clave solo existe dentro de los secretos de GitHub (no se puede leer de vuelta). Si algún día se pierde, se repite el proceso y hay que desinstalar una vez más.
 
 ## Desarrollo
 
