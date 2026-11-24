@@ -166,6 +166,14 @@
 }
 
 * { box-sizing: border-box; }
+:root { --row-h: 68px; --row-pad: var(--space-2); --thumb: 44px; --trail: 44px; }
+body.dense { --row-h: 50px; --row-pad: 2px; --thumb: 34px; --trail: 38px; }
+body.dense .item { gap: var(--space-2); }
+body.dense .thumb .ic { width: 20px; height: 20px; }
+body.dense .sub { margin-top: 0; font-size: 0.75rem; }
+body.dense .path { margin-top: 0; font-size: 0.75rem; }
+body.dense .more-btn { width: 36px; height: 36px; }
+body.dense .list.grid { grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); gap: var(--space-2); }
 [hidden], .hidden { display: none !important; }
 
 html, body {
@@ -273,9 +281,9 @@ body.bar-on .content { padding-bottom: calc(var(--sab) + 90px); }
 
 /* lista: filas separadas por líneas, sin tarjetas */
 .item {
-  display: flex; align-items: center; gap: var(--space-3); min-height: 68px; padding: var(--space-2) var(--space-1) var(--space-2) var(--space-2);
+  display: flex; align-items: center; gap: var(--space-3); min-height: var(--row-h); padding: var(--row-pad) var(--space-1) var(--row-pad) var(--space-2);
   border-bottom: var(--border-width) solid var(--color-border); cursor: pointer;
-  content-visibility: auto; contain-intrinsic-size: auto 68px;
+  content-visibility: auto; contain-intrinsic-size: auto var(--row-h);
   transition: background var(--duration-fast) var(--ease);
 }
 .item:active { background: var(--press); }
@@ -288,7 +296,7 @@ body.bar-on .content { padding-bottom: calc(var(--sab) + 90px); }
 .group-head .ic { width: 18px; height: 18px; }
 
 .thumb {
-  position: relative; width: 44px; height: 44px; flex: none; border-radius: var(--radius-md); overflow: hidden;
+  position: relative; width: var(--thumb); height: var(--thumb); flex: none; border-radius: var(--radius-md); overflow: hidden;
   display: flex; align-items: center; justify-content: center;
   color: rgb(var(--t)); background: rgba(var(--t), 0.12);
 }
@@ -309,7 +317,7 @@ body.bar-on .content { padding-bottom: calc(var(--sab) + 90px); }
 .sub { margin-top: 2px; font-size: var(--text-sm); color: var(--color-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .path { margin-top: 2px; font-size: var(--text-sm); color: var(--color-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.trail { position: relative; width: 44px; height: 44px; flex: none; display: flex; align-items: center; justify-content: center; }
+.trail { position: relative; width: var(--trail); height: var(--trail); flex: none; display: flex; align-items: center; justify-content: center; }
 .check { display: none; width: 44px; height: 44px; align-items: center; justify-content: center; }
 .check i {
   width: 22px; height: 22px; border-radius: var(--radius-sm); border: 2px solid var(--color-muted); display: flex; align-items: center; justify-content: center; color: transparent;
@@ -620,3 +628,19 @@ body.fab-on .snack, body.bar-on .snack { bottom: calc(var(--sab) + 84px); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
+
+/* ------------------------------------------------------------ recientes en la portada */
+.section-head { display: flex; align-items: center; justify-content: space-between; margin: var(--space-6) 0 var(--space-2); }
+.section-head .section-title { margin: 0; }
+.home > .section-head:first-child { margin-top: 0; }
+.rc-strip { display: flex; gap: var(--space-3); overflow-x: auto; padding: 2px 2px var(--space-2); scroll-snap-type: x proximity; scrollbar-width: none; }
+.rc-strip::-webkit-scrollbar { display: none; }
+.rc { flex: none; width: 112px; display: flex; flex-direction: column; gap: 2px; padding: var(--space-2); text-align: left; cursor: pointer; scroll-snap-align: start;
+  background: var(--color-surface); border: var(--border-width) solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
+.rc:active { background: var(--press); }
+.rc .thumb { width: 100%; height: 72px; margin-bottom: var(--space-1); }
+.rc .thumb .ic { width: 28px; height: 28px; }
+.rc-name { font-weight: 600; font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-sub { font-size: 0.72rem; color: var(--color-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.rc-empty { margin: 0; font-size: var(--text-sm); color: var(--color-muted); }
+.btn:disabled { opacity: .45; cursor: default; }

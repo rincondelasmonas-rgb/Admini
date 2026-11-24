@@ -11,7 +11,8 @@ Administrador de archivos completo para Android (Capacitor 6). Todo es local: si
 - **Limpieza**: detector de duplicados (tamaño → huella SHA-1) y selección de copias sobrantes.
 - **Visor** de imágenes (zoom), video y audio con flechas, **editor de texto**, "Abrir con…", compartir y abrir/instalar APK.
 - Lista o cuadrícula, orden por nombre/fecha/tamaño/tipo, archivos ocultos, favoritos, selección múltiple con pulsación larga.
-- Tema claro/oscuro automático.
+- **Ajustes que funcionan**: tema (automático/claro/oscuro), tamaño de texto, filas compactas o cómodas, miniaturas, orden y dirección por defecto, carpetas primero, ocultos, pantalla de inicio, cuántos recientes ver, papelera (usar, días, vaciar) y restablecer.
+- Portada con **Recientes** arriba en tarjetas deslizables; carpetas con filas compactas.
 - **Migración**: si usabas la versión 1 (bóveda interna), sus archivos pasan a `Documents/Archivos` y lo que estaba en su papelera va a la nueva.
 
 ## Diseño

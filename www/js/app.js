@@ -32,11 +32,38 @@ const LIST_ROUTES = new Set(['folder', 'cat', 'recent', 'large', 'search', 'tras
 const GRID_ROUTES = new Set(['folder', 'cat', 'recent', 'large', 'search']);
 
 // ---------------------------------------------------------------- ajustes y favoritos
-const DEFAULTS = { showHidden: false, foldersFirst: true, view: 'list', sortKey: 'name', sortDir: 'asc', useTrash: true, trashDays: 30 };
+const DEFAULTS = {
+  showHidden: false, foldersFirst: true, view: 'list', sortKey: 'name', sortDir: 'asc', useTrash: true, trashDays: 30,
+  theme: 'auto', textSize: 100, density: 'compact', thumbs: true, startIn: 'home', recentCount: 8,
+};
+const OPTIONS = {
+  theme: ['auto', 'light', 'dark'], textSize: [90, 100, 115, 130], density: ['compact', 'cozy'], startIn: ['home', 'storage'],
+  recentCount: [0, 4, 8, 12], view: ['list', 'grid'], sortKey: ['name', 'date', 'size', 'type'], sortDir: ['asc', 'desc'], trashDays: [0, 7, 30, 90],
+};
+
+// aplica tema, tamaño de texto y densidad al documento
+function applyAppearance() {
+  const st = S.settings;
+  const root = document.documentElement;
+  if (st.theme === 'light' || st.theme === 'dark') root.setAttribute('data-theme', st.theme);
+  else root.removeAttribute('data-theme');
+  root.style.fontSize = `${st.textSize}%`;
+  document.body.classList.toggle('dense', st.density === 'compact');
+  const dark = st.theme === 'dark' || (st.theme === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.remove());
+  const m = document.createElement('meta');
+  m.name = 'theme-color';
+  m.content = dark ? '#162127' : '#FFFFFF';
+  document.head.appendChild(m);
+}
 
 function loadSettings() {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('archivos.settings') || '{}') };
+    const raw = JSON.parse(localStorage.getItem('archivos.settings') || '{}');
+    const out = { ...DEFAULTS, ...raw };
+    for (const k of Object.keys(OPTIONS)) if (!OPTIONS[k].includes(out[k])) out[k] = DEFAULTS[k];
+    for (const k of ['showHidden', 'foldersFirst', 'useTrash', 'thumbs']) if (typeof out[k] !== 'boolean') out[k] = DEFAULTS[k];
+    return out;
   } catch (e) {
     return { ...DEFAULTS };
   }
@@ -139,7 +166,7 @@ async function loadHome(seq) {
   const jobs = [
     Files.existsMany({ paths }).then((r) => { S.quickExisting = r.existing; }),
     Files.categoryCounts().then((c) => { S.counts = c; }),
-    Files.recent({ limit: 6 }).then((r) => { S.homeRecent = r.entries; }),
+    Files.recent({ limit: Math.max(S.settings.recentCount, 1) }).then((r) => { S.homeRecent = r.entries; }),
     Files.trashList().then((r) => { S.trashInfo = { count: r.entries.length, size: r.entries.reduce((s, t) => s + (t.size || 0), 0) }; }),
   ];
   for (const j of jobs) {
@@ -188,6 +215,11 @@ async function load() {
       case 'trash': {
         const res = await Files.trashList();
         if (seq === S.seq) S.entries = res.entries.map(toTrashEntry).sort((a, b) => b.deletedAt - a.deletedAt);
+        break;
+      }
+      case 'settings': {
+        const tl = await Files.trashList().catch(() => null);
+        if (tl && seq === S.seq) S.trashInfo = { count: tl.entries.length, size: tl.entries.reduce((t, x) => t + (x.size || 0), 0) };
         break;
       }
       case 'dups':
@@ -390,7 +422,7 @@ function renderBanner() {
 // --- vista principal
 function thumbHtml(e) {
   const k = kind(e);
-  const img = k === 'image' && e.size <= THUMB_MAX ? `<img src="${esc(fileUrl(e.path))}" alt="" loading="lazy" decoding="async">` : '';
+  const img = S.settings.thumbs && k === 'image' && e.size <= THUMB_MAX ? `<img src="${esc(fileUrl(e.path))}" alt="" loading="lazy" decoding="async">` : '';
   return `<div class="thumb c-${k}">${icon(k)}${img}</div>`;
 }
 
@@ -561,22 +593,22 @@ function homeHtml() {
     .filter((c) => have.has(c.path))
     .map((c) => `<button type="button" class="chip" data-quick="${esc(c.path)}">${icon(c.ic)}<span>${esc(c.label)}</span></button>`)
     .join('');
-  const recent = S.homeRecent
-    .map(
-      (e) => `<li class="item" data-recent="${esc(e.path)}">${thumbHtml(e)}<div class="meta"><div class="name">${esc(e.name)}</div><div class="sub">${esc(formatSize(e.size))} · ${esc(formatDate(e.mtime))}</div></div></li>`
-    )
-    .join('');
+  const recent = S.settings.recentCount > 0
+    ? S.homeRecent.slice(0, S.settings.recentCount).map(
+      (e) => `<button type="button" class="rc" data-recent="${esc(e.path)}">${thumbHtml(e)}<span class="rc-name">${esc(e.name)}</span><span class="rc-sub">${esc(formatSize(e.size))} · ${esc(formatDate(e.mtime))}</span></button>`
+    ).join('')
+    : '';
   const ti = S.trashInfo;
   return `<div class="home">
     <section class="vols">${vols}</section>
+    ${S.settings.recentCount > 0 ? `<div class="section-head"><h2 class="section-title">Recientes</h2><button type="button" class="btn text" data-a="seerecent">Ver todo</button></div>${recent ? `<section class="rc-strip">${recent}</section>` : '<p class="rc-empty">Aún no hay archivos recientes.</p>'}` : ''}
     <h2 class="section-title">Categorías</h2><section class="cat-grid">${cats}</section>
     ${chips ? `<h2 class="section-title">Carpetas</h2><section class="chips">${chips}</section>` : ''}
-    ${recent ? `<div class="section-head"><h2 class="section-title">Recientes</h2><button type="button" class="btn text" data-a="seerecent">Ver todo</button></div><ul class="list">${recent}</ul>` : ''}
     <h2 class="section-title">Herramientas</h2>
     <section class="tools">
       <button type="button" class="tool" data-tool="trash"><span class="tool-ic">${icon('trash')}</span><span class="tool-meta"><b>Papelera</b><small>${ti ? (ti.count ? `${countText(ti.count, 'elemento', 'elementos')} · ${formatSize(ti.size)}` : 'Vacía') : ''}</small></span>${icon('chevron')}</button>
       <button type="button" class="tool" data-tool="clean"><span class="tool-ic">${icon('clean')}</span><span class="tool-meta"><b>Limpieza</b><small>Archivos grandes y duplicados</small></span>${icon('chevron')}</button>
-      <button type="button" class="tool" data-tool="settings"><span class="tool-ic">${icon('settings')}</span><span class="tool-meta"><b>Ajustes</b><small>Vista, ocultos, papelera, permisos</small></span>${icon('chevron')}</button>
+      <button type="button" class="tool" data-tool="settings"><span class="tool-ic">${icon('settings')}</span><span class="tool-meta"><b>Ajustes</b><small>Tema, texto, orden, papelera, permisos</small></span>${icon('chevron')}</button>
     </section></div>`;
 }
 
@@ -604,24 +636,44 @@ const seg = (key, cur, opts) => `<div class="seg" role="radiogroup">${opts.map((
 
 function settingsHtml() {
   const s = S.settings;
+  const ti = S.trashInfo;
+  const trashTxt = ti ? (ti.count ? `${countText(ti.count, 'elemento', 'elementos')} · ${formatSize(ti.size)}` : 'La papelera está vacía') : '';
   return `<div class="settings">
-    <h2 class="section-title">Vista</h2>
+    <h2 class="section-title">Apariencia</h2>
+    <section class="card">
+      <div class="set-row static"><span class="set-meta"><b>Tema</b><small>Automático sigue al del teléfono</small></span>${seg('theme', s.theme, [['auto', 'Automático'], ['light', 'Claro'], ['dark', 'Oscuro']])}</div>
+      <div class="set-row static"><span class="set-meta"><b>Tamaño del texto</b></span>${seg('textSize', s.textSize, [[90, 'Pequeño'], [100, 'Normal'], [115, 'Grande'], [130, 'Muy grande']])}</div>
+      <div class="set-row static"><span class="set-meta"><b>Filas de la lista</b><small>Compacta muestra más archivos sin espacio de sobra</small></span>${seg('density', s.density, [['compact', 'Compacta'], ['cozy', 'Cómoda']])}</div>
+      ${sw('thumbs', s.thumbs, 'Miniaturas de imágenes', 'Si lo apagas se ve solo el icono (más ligero)')}
+    </section>
+    <h2 class="section-title">Carpetas y orden</h2>
     <section class="card">
       <div class="set-row static"><span class="set-meta"><b>Vista de carpetas</b></span>${seg('view', s.view, [['list', 'Lista'], ['grid', 'Cuadrícula']])}</div>
-      ${sw('showHidden', s.showHidden, 'Mostrar archivos ocultos', 'Los que empiezan con punto')}
+      <div class="set-row static"><span class="set-meta"><b>Ordenar por</b><small>En carpetas y en la búsqueda</small></span>${seg('sortKey', s.sortKey, [['name', 'Nombre'], ['date', 'Fecha'], ['size', 'Tamaño'], ['type', 'Tipo']])}</div>
+      <div class="set-row static"><span class="set-meta"><b>Dirección</b></span>${seg('sortDir', s.sortDir, [['asc', 'Ascendente'], ['desc', 'Descendente']])}</div>
       ${sw('foldersFirst', s.foldersFirst, 'Carpetas primero', 'Antes que los archivos al ordenar')}
+      ${sw('showHidden', s.showHidden, 'Mostrar archivos ocultos', 'Los que empiezan con punto')}
+    </section>
+    <h2 class="section-title">Inicio</h2>
+    <section class="card">
+      <div class="set-row static"><span class="set-meta"><b>Al abrir la app</b><small>Dónde empiezas</small></span>${seg('startIn', s.startIn, [['home', 'Portada'], ['storage', 'Almacenamiento']])}</div>
+      <div class="set-row static"><span class="set-meta"><b>Recientes en la portada</b><small>Cuántos archivos se ven arriba</small></span>${seg('recentCount', s.recentCount, [[0, 'Ocultar'], [4, '4'], [8, '8'], [12, '12']])}</div>
     </section>
     <h2 class="section-title">Papelera</h2>
     <section class="card">
       ${sw('useTrash', s.useTrash, 'Usar la papelera', s.useTrash ? 'Eliminar mueve a la papelera y se puede deshacer' : 'Eliminar borra para siempre (pide confirmación)')}
       <div class="set-row static"><span class="set-meta"><b>Conservar</b><small>Tiempo antes de borrarse sola</small></span>${seg('trashDays', s.trashDays, [[7, '7 días'], [30, '30 días'], [90, '90 días'], [0, 'Siempre']])}</div>
+      <div class="set-row static"><span class="set-meta"><b>Vaciar ahora</b><small>${esc(trashTxt)}</small></span><button type="button" class="btn tonal" data-a="emptytrash" ${ti && !ti.count ? 'disabled' : ''}>Vaciar</button></div>
     </section>
     <h2 class="section-title">Permisos</h2>
     <section class="card">
-      <div class="set-row static"><span class="set-meta"><b>Acceso a todos los archivos</b><small>${S.access ? 'Activado' : 'Desactivado'}</small></span><button type="button" class="btn tonal" data-a="${S.access ? 'appsettings' : 'grant'}">${S.access ? 'Ajustes' : 'Activar'}</button></div>
+      <div class="set-row static"><span class="set-meta"><b>Acceso a todos los archivos</b><small>${S.access ? 'Activado' : 'Desactivado'}</small></span><button type="button" class="btn tonal" data-a="${S.access ? 'appsettings' : 'grant'}">${S.access ? 'Ajustes' : 'Dar permiso'}</button></div>
     </section>
     <h2 class="section-title">Acerca de</h2>
-    <section class="card"><div class="set-row static"><span class="set-meta"><b>Archivos</b><small>${S.version ? `Versión ${esc(S.version)} · ` : ''}Todo es local: sin servidor ni cuentas.</small></span></div></section></div>`;
+    <section class="card">
+      <div class="set-row static"><span class="set-meta"><b>Archivos</b><small>${S.version ? `Versión ${esc(S.version)} · ` : ''}Todo es local: sin servidor ni cuentas.</small></span></div>
+      <div class="set-row static"><span class="set-meta"><b>Restablecer ajustes</b><small>Vuelve a los valores originales (tus archivos no se tocan)</small></span><button type="button" class="btn tonal danger-text" data-a="resetsettings">Restablecer</button></div>
+    </section></div>`;
 }
 
 // --- barras inferiores
@@ -1129,6 +1181,12 @@ function setSetting(key, value) {
   } else if (key === 'trashDays') {
     purgeTrash().catch(() => {});
     renderAll();
+  } else if (key === 'recentCount') {
+    renderAll();
+    if (value > 0) Files.recent({ limit: value }).then((r) => { S.homeRecent = r.entries; }).catch(() => {});
+  } else if (key === 'theme' || key === 'textSize' || key === 'density') {
+    applyAppearance();
+    renderAll();
   } else renderAll();
 }
 
@@ -1343,7 +1401,7 @@ function wire() {
     const set = t.closest('[data-set]');
     if (set) {
       const key = set.dataset.set;
-      if (set.dataset.val !== undefined) return setSetting(key, key === 'trashDays' ? Number(set.dataset.val) : set.dataset.val);
+      if (set.dataset.val !== undefined) return setSetting(key, ['trashDays', 'textSize', 'recentCount'].includes(key) ? Number(set.dataset.val) : set.dataset.val);
       return setSetting(key, !S.settings[key]);
     }
     const a = t.closest('[data-a]');
@@ -1435,6 +1493,25 @@ function handleTopAction(a) {
     }
     case 'retry': return void guarded(reloadCurrent);
     case 'seerecent': return void go({ name: 'recent' });
+    case 'emptytrash': return void guarded(async () => {
+      const tl = await Files.trashList();
+      if (!tl.entries.length) return;
+      const ok = await confirmDialog({ title: '¿Vaciar la papelera?', message: `Se eliminarán para siempre ${countText(tl.entries.length, 'elemento', 'elementos')} (${formatSize(tl.entries.reduce((t, x) => t + (x.size || 0), 0))}). No se puede deshacer.`, confirmText: 'Vaciar', danger: true });
+      if (!ok) return;
+      await Files.trashEmpty();
+      S.trashInfo = { count: 0, size: 0 };
+      renderAll();
+      toast('Papelera vacía');
+    });
+    case 'resetsettings': return void guarded(async () => {
+      const ok = await confirmDialog({ title: '¿Restablecer ajustes?', message: 'Tema, texto, orden, papelera y demás vuelven a los valores originales. Tus archivos y favoritos no se tocan.', confirmText: 'Restablecer', danger: true });
+      if (!ok) return;
+      S.settings = { ...DEFAULTS };
+      persist('archivos.settings', S.settings);
+      applyAppearance();
+      renderAll();
+      toast('Ajustes restablecidos');
+    });
     case 'grant': return void grantAccess();
     case 'appsettings': return void Files.openAppSettings().catch(() => {});
     default: return undefined;
@@ -1456,9 +1533,11 @@ async function startApp() {
   S.history = [];
   S.route = { name: 'home' };
   await go({ name: 'home' }, { push: false });
+  if (S.settings.startIn === 'storage' && S.volumes[0]) await go({ name: 'folder', path: S.volumes[0].path }, { push: true });
 }
 
 async function boot() {
+  applyAppearance();
   hydrateIcons();
   wire();
   initViewer((act, e) => {
