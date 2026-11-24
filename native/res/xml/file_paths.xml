@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Todo el almacenamiento (interno y tarjeta SD): permite abrir y compartir cualquier archivo -->
+    <root-path name="root" path="" />
+</paths>

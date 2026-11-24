@@ -1,13 +1,8 @@
-// Utilidades puras (sin DOM): se prueban con `npm test`.
+// Utilidades puras (sin DOM ni Android): se prueban con `npm test`.
 
-export const MAX_SIZE = 20 * 1024 * 1024; // 20 MB por archivo
-export const TRASH_DAYS = 30;
 export const DAY_MS = 86400000;
-export const TRASH_MS = TRASH_DAYS * DAY_MS;
-export const MAX_NAME = 150;
-
-const FORBIDDEN_G = /[\\/:*?"<>|\u0000-\u001f\u007f]/g;
-const FORBIDDEN = /[\\/:*?"<>|\u0000-\u001f\u007f]/;
+export const MAX_NAME = 255;
+export const FORBIDDEN = /[\\/\u0000-\u001f\u007f]/;
 
 export function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -18,6 +13,65 @@ export function norm(s) {
   return String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 }
 
+export function plural(n, one, many) {
+  return n === 1 ? one : many;
+}
+
+// ---------------------------------------------------------------- rutas
+
+export function baseName(p) {
+  const s = String(p).replace(/\/+$/, '');
+  return s.slice(s.lastIndexOf('/') + 1);
+}
+
+export function parentPath(p) {
+  const s = String(p).replace(/\/+$/, '');
+  const i = s.lastIndexOf('/');
+  return i <= 0 ? '/' : s.slice(0, i);
+}
+
+export function joinPath(dir, name) {
+  return `${String(dir).replace(/\/+$/, '')}/${name}`;
+}
+
+export function isUnder(path, root) {
+  const r = String(root).replace(/\/+$/, '');
+  return path === r || path.startsWith(`${r}/`);
+}
+
+/** Volumen al que pertenece una ruta (el más específico). */
+export function volumeOf(path, volumes) {
+  let best = null;
+  for (const v of volumes) {
+    if (isUnder(path, v.path) && (!best || v.path.length > best.path.length)) best = v;
+  }
+  return best;
+}
+
+/** "/storage/emulated/0/DCIM/Camera" -> [{label:'Almacenamiento interno',path:'/storage/emulated/0'},{label:'DCIM',...},{label:'Camera',...}] */
+export function breadcrumbs(path, volumes) {
+  const vol = volumeOf(path, volumes);
+  if (!vol) return [{ label: path || '/', path }];
+  const out = [{ label: vol.label, path: vol.path }];
+  const rest = path.slice(vol.path.length).split('/').filter(Boolean);
+  let cur = vol.path;
+  for (const seg of rest) {
+    cur = joinPath(cur, seg);
+    out.push({ label: seg, path: cur });
+  }
+  return out;
+}
+
+/** Ruta legible: la raíz del volumen se cambia por su nombre. */
+export function displayPath(path, volumes) {
+  const vol = volumeOf(path, volumes);
+  if (!vol) return path;
+  const rest = path.slice(vol.path.length);
+  return vol.label + rest;
+}
+
+// ---------------------------------------------------------------- nombres
+
 /** "foto.final.jpg" -> { base: "foto.final", ext: ".jpg" }. ".env" y "README" no tienen extensión. */
 export function splitName(name) {
   const i = name.lastIndexOf('.');
@@ -25,26 +79,17 @@ export function splitName(name) {
   return { base: name.slice(0, i), ext: name.slice(i) };
 }
 
-/** Limpia un nombre que viene del selector del sistema. */
-export function sanitizeName(raw) {
-  let n = String(raw == null ? '' : raw).replace(FORBIDDEN_G, '_').replace(/\s+/g, ' ').trim();
-  n = n.replace(/[. ]+$/, '');
-  if (!n || n === '.' || n === '..') n = 'archivo';
-  if (n.length > MAX_NAME) {
-    const { base, ext } = splitName(n);
-    const e = ext.slice(0, 20);
-    n = base.slice(0, MAX_NAME - e.length) + e;
-  }
-  return n;
+export function extOf(name) {
+  return splitName(name).ext.slice(1).toLowerCase();
 }
 
 /**
- * Si `name` ya existe en `taken` (Set de nombres en minúscula) devuelve "nombre (2).ext",
- * "nombre (3).ext", etc. Si el nombre ya traía " (n)", sigue contando desde la base.
+ * Si `name` ya existe en `taken` (Set en minúscula) devuelve "nombre (2).ext", "nombre (3).ext"…
+ * Las carpetas no tienen extensión.
  */
-export function uniqueName(name, taken) {
+export function uniqueName(name, taken, isDir = false) {
   if (!taken.has(name.toLowerCase())) return name;
-  const { base, ext } = splitName(name);
+  const { base, ext } = isDir ? { base: name, ext: '' } : splitName(name);
   const m = base.match(/^(.*) \((\d+)\)$/);
   const stem = m ? m[1] : base;
   for (let n = 2; ; n++) {
@@ -53,39 +98,26 @@ export function uniqueName(name, taken) {
   }
 }
 
-/** Valida el nombre (sin extensión) al renombrar. `taken` = nombres activos en minúscula, sin el propio. */
-export function validateRename(base, ext, taken) {
-  const b = String(base).trim();
-  if (!b) return 'El nombre no puede estar vacío.';
-  if (FORBIDDEN.test(b)) return 'No puede contener / \\ : * ? " < > |';
-  if (/^\.+$/.test(b)) return 'Nombre no válido.';
-  const full = b + ext;
-  if (full.length > MAX_NAME) return `Máximo ${MAX_NAME} caracteres.`;
-  if (taken.has(full.toLowerCase())) return 'Ya existe un archivo con ese nombre.';
+/** Valida un nombre de archivo o carpeta. `taken` = nombres existentes en minúscula, sin el propio. '' = correcto. */
+export function validateName(name, taken = new Set()) {
+  const n = String(name).trim();
+  if (!n) return 'El nombre no puede estar vacío.';
+  if (FORBIDDEN.test(n)) return 'No puede contener / \\ ni caracteres de control.';
+  if (n === '.' || n === '..') return 'Nombre no válido.';
+  if (new TextEncoder().encode(n).length > MAX_NAME) return `Máximo ${MAX_NAME} caracteres.`;
+  if (taken.has(n.toLowerCase())) return 'Ya existe algo con ese nombre.';
   return '';
 }
 
-function rand() {
-  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
-}
-
-/**
- * id único. Lleva la extensión original (saneada) al final: el archivo en disco se llama igual que el id,
- * así el WebView reconoce el tipo al previsualizar y renombrar nunca toca el archivo físico.
- */
-export function makeId(name) {
-  const e = splitName(name).ext.slice(1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8);
-  return rand() + (e ? '.' + e : '');
-}
+// ---------------------------------------------------------------- formato
 
 export function formatSize(n) {
   if (!Number.isFinite(n) || n < 0) n = 0;
   if (n < 1024) return `${n} B`;
-  const units = ['B', 'KB', 'MB', 'GB'];
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let v = n;
   let i = 0;
-  while (v >= 1024 && i < 3) {
+  while (v >= 1024 && i < 4) {
     v /= 1024;
     i++;
   }
@@ -103,28 +135,32 @@ export function formatDateTime(ts) {
   return dtFmt.format(ts);
 }
 
-export function daysLeft(trashedAt, now = Date.now()) {
-  return Math.ceil((trashedAt + TRASH_MS - now) / DAY_MS);
+export function percent(used, total) {
+  if (!total) return 0;
+  return Math.max(0, Math.min(100, Math.round((used / total) * 100)));
 }
-export function daysLeftLabel(trashedAt, now = Date.now()) {
-  const n = daysLeft(trashedAt, now);
+
+// ---------------------------------------------------------------- papelera
+
+export function daysLeft(deletedAt, retention, now = Date.now()) {
+  return Math.ceil((deletedAt + retention * DAY_MS - now) / DAY_MS);
+}
+/** retention = días (0 = nunca se borra solo). */
+export function trashLabel(deletedAt, retention, now = Date.now()) {
+  if (!retention) return 'Se queda hasta que la vacíes';
+  const n = daysLeft(deletedAt, retention, now);
   if (n <= 1) return 'Se elimina en menos de 1 día';
   return `Se elimina en ${n} días`;
 }
 
-export function plural(n, one, many) {
-  return n === 1 ? one : many;
-}
+// ---------------------------------------------------------------- tipos
 
 const MIME = {
-  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp',
-  svg: 'image/svg+xml', heic: 'image/heic', heif: 'image/heif', avif: 'image/avif',
-  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska',
-  '3gp': 'video/3gpp', avi: 'video/x-msvideo',
-  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg',
-  opus: 'audio/ogg', flac: 'audio/flac',
-  pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json',
-  html: 'text/html', xml: 'application/xml',
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml',
+  heic: 'image/heic', heif: 'image/heif', avif: 'image/avif',
+  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska', '3gp': 'video/3gpp', avi: 'video/x-msvideo',
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', flac: 'audio/flac',
+  pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json', html: 'text/html', xml: 'application/xml',
   zip: 'application/zip', rar: 'application/vnd.rar', '7z': 'application/x-7z-compressed', apk: 'application/vnd.android.package-archive',
   doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -132,35 +168,60 @@ const MIME = {
 };
 
 export function guessMime(name) {
-  const e = splitName(name).ext.slice(1).toLowerCase();
-  return MIME[e] || 'application/octet-stream';
+  return MIME[extOf(name)] || 'application/octet-stream';
 }
 
-export function effectiveType(f) {
-  const t = (f.type || '').toLowerCase();
-  return t && t !== 'application/octet-stream' ? t : guessMime(f.name);
-}
+const TEXT_EXT = new Set([
+  'txt', 'md', 'csv', 'json', 'xml', 'html', 'htm', 'css', 'js', 'mjs', 'ts', 'log', 'ini', 'cfg', 'conf', 'yml', 'yaml', 'toml', 'properties',
+  'java', 'kt', 'py', 'c', 'h', 'cpp', 'cs', 'sh', 'bat', 'ps1', 'sql', 'gradle', 'srt', 'vtt', 'env', 'gitignore', 'tsv',
+]);
+const DOC_EXT = new Set(['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'rtf', 'epub']);
+const ARC_EXT = new Set(['zip', 'rar', '7z', 'tar', 'gz', 'tgz', 'bz2', 'xz']);
 
-/** image | video | audio | pdf | doc | archive | file */
-export function category(f) {
-  const t = effectiveType(f);
-  if (t.startsWith('image/')) return 'image';
-  if (t.startsWith('video/')) return 'video';
-  if (t.startsWith('audio/')) return 'audio';
-  if (t === 'application/pdf') return 'pdf';
-  if (/zip|rar|7z|tar|gzip|compressed/.test(t)) return 'archive';
-  if (t.startsWith('text/') || /word|sheet|excel|presentation|powerpoint|json|xml|opendocument/.test(t)) return 'doc';
+/** folder | image | video | audio | pdf | text | doc | archive | apk | file */
+export function kind(e) {
+  if (e.dir) return 'folder';
+  const x = extOf(e.name);
+  if (x === 'apk') return 'apk';
+  const m = MIME[x] || '';
+  if (m.startsWith('image/')) return 'image';
+  if (m.startsWith('video/')) return 'video';
+  if (m.startsWith('audio/')) return 'audio';
+  if (x === 'pdf') return 'pdf';
+  if (ARC_EXT.has(x)) return 'archive';
+  if (TEXT_EXT.has(x) || (!x && /^(readme|license|makefile|dockerfile)$/i.test(e.name))) return 'text';
+  if (DOC_EXT.has(x)) return 'doc';
   return 'file';
 }
 
-export const CATEGORY_LABEL = {
-  image: 'Imagen', video: 'Video', audio: 'Audio', pdf: 'Documento PDF', doc: 'Documento', archive: 'Archivo comprimido', file: 'Archivo',
+export const KIND_LABEL = {
+  folder: 'Carpeta', image: 'Imagen', video: 'Video', audio: 'Audio', pdf: 'Documento PDF', text: 'Texto', doc: 'Documento',
+  archive: 'Archivo comprimido', apk: 'App Android (APK)', file: 'Archivo',
 };
 
-export function sortFiles(list, mode, trashView) {
-  const arr = list.slice();
-  if (mode === 'name') arr.sort((a, b) => a.name.localeCompare(b.name, 'es', { numeric: true, sensitivity: 'base' }));
-  else if (mode === 'size') arr.sort((a, b) => b.size - a.size || a.name.localeCompare(b.name, 'es'));
-  else arr.sort((a, b) => (trashView ? b.trashedAt - a.trashedAt : b.at - a.at));
-  return arr;
+export const isZip = (e) => !e.dir && extOf(e.name) === 'zip';
+export const isEditable = (e) => !e.dir && kind(e) === 'text';
+
+// ---------------------------------------------------------------- orden
+
+/** key: name | date | size | type · dir: asc | desc · foldersFirst: carpetas antes que archivos */
+export function sortEntries(list, { key = 'name', dir = 'asc' } = {}, foldersFirst = true) {
+  const sign = dir === 'desc' ? -1 : 1;
+  const byName = (a, b) => a.name.localeCompare(b.name, 'es', { numeric: true, sensitivity: 'base' });
+  const cmp = (a, b) => {
+    if (foldersFirst && a.dir !== b.dir) return a.dir ? -1 : 1;
+    let r;
+    if (key === 'date') r = a.mtime - b.mtime;
+    else if (key === 'size') r = (a.dir ? (a.count || 0) : a.size) - (b.dir ? (b.count || 0) : b.size);
+    else if (key === 'type') r = extOf(a.name).localeCompare(extOf(b.name)) || byName(a, b);
+    else r = byName(a, b);
+    return r * sign || byName(a, b);
+  };
+  return list.slice().sort(cmp);
+}
+
+/** Rutas de copias sobrantes de un grupo de duplicados: se conserva la más antigua. */
+export function extraCopies(group) {
+  const sorted = group.slice().sort((a, b) => a.mtime - b.mtime || a.path.length - b.path.length);
+  return sorted.slice(1).map((e) => e.path);
 }

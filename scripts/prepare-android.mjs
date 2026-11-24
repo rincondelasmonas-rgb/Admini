@@ -1,5 +1,5 @@
 // Se ejecuta DESPUÉS de `npx cap add android` y ANTES de `npx cap sync android`.
-// Deja el proyecto Android listo: plugin nativo de Descargas, tema/íconos, minSdk, versión y firma.
+// Deja el proyecto Android listo: plugin nativo de Archivos (acceso total, papelera, copiar/mover, zip…), tema/íconos, minSdk, versión y firma.
 //
 // Variables de entorno opcionales:
 //   VERSION_NAME, VERSION_CODE                      versión del APK (el workflow usa el número de ejecución)
@@ -45,7 +45,7 @@ function findFiles(dir, name, out = []) {
 
 if (!fs.existsSync(android)) throw new Error('No existe la carpeta android/. Ejecuta primero: npx cap add android');
 
-// 1) Código Java: MainActivity registra el plugin "Downloads"
+// 1) Código Java: MainActivity registra el plugin "Files"
 const javaRoot = path.join(android, 'app/src/main/java');
 const pkgDir = path.join(javaRoot, ...appId.split('.'));
 fs.mkdirSync(pkgDir, { recursive: true });
@@ -55,13 +55,13 @@ for (const f of findFiles(javaRoot, 'MainActivity.java')) {
 for (const f of fs.readdirSync(path.join(root, 'native/java'))) {
   write(path.join(pkgDir, f), read(path.join(root, 'native/java', f)).replaceAll('__APP_ID__', appId));
 }
-console.log('✔ MainActivity y DownloadsPlugin copiados');
+console.log('✔ MainActivity y FilesPlugin copiados');
 
 // 2) Recursos: tema (barras del sistema claro/oscuro), ícono adaptable, fondo de arranque
 copyDir(path.join(root, 'native/res'), path.join(android, 'app/src/main/res'));
 console.log('✔ Recursos (tema, ícono) copiados');
 
-// 3) Android 10+ (necesario para guardar en Descargas sin permisos)
+// 3) Android 10+
 patch(path.join(android, 'variables.gradle'), /minSdkVersion\s*=\s*\d+/, 'minSdkVersion = 29', 'minSdkVersion = 29');
 
 // 4) Manifiesto: sin copias de seguridad automáticas (evita restaurar archivos sin sus metadatos) y teclado que no tapa el diálogo
@@ -73,9 +73,44 @@ if (!read(manifest).includes('windowSoftInputMode')) {
   patch(manifest, /<activity\b/, '<activity android:windowSoftInputMode="adjustResize"', 'windowSoftInputMode=adjustResize');
 }
 
+// 4b) Permisos de archivos, almacenamiento heredado (Android 10) e instalación de APK
+const wantedPerms = [
+  'android.permission.MANAGE_EXTERNAL_STORAGE',
+  'android.permission.READ_EXTERNAL_STORAGE',
+  'android.permission.WRITE_EXTERNAL_STORAGE',
+  'android.permission.REQUEST_INSTALL_PACKAGES',
+];
+let mf = read(manifest);
+const missing = wantedPerms.filter((p) => !mf.includes(`"${p}"`));
+if (missing.length) {
+  const lines = missing.map((p) => `    <uses-permission android:name="${p}" />`).join('\n');
+  if (!/<\/manifest>/.test(mf)) throw new Error('Manifiesto sin </manifest>');
+  mf = mf.replace(/<\/manifest>/, `\n${lines}\n</manifest>`);
+  console.log(`✔ Permisos añadidos: ${missing.length}`);
+}
+if (!mf.includes('requestLegacyExternalStorage')) {
+  if (!/<application\b/.test(mf)) throw new Error('Manifiesto sin <application>');
+  mf = mf.replace(/<application\b/, '<application android:requestLegacyExternalStorage="true"');
+  console.log('✔ requestLegacyExternalStorage=true');
+}
+// FileProvider (la plantilla de Capacitor ya lo trae; si faltara, se inyecta)
+if (!mf.includes('androidx.core.content.FileProvider')) {
+  const provider = `        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="\${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
+        </provider>
+`;
+  mf = mf.replace(/<\/application>/, `${provider}    </application>`);
+  console.log('✔ FileProvider inyectado');
+}
+write(manifest, mf);
+
 // 5) Versión: versionCode debe subir en cada compilación para que se pueda instalar encima
 const gradle = path.join(android, 'app/build.gradle');
-const versionName = process.env.VERSION_NAME || '1.0.0';
+const versionName = process.env.VERSION_NAME || '2.0.0';
 const versionCode = parseInt(process.env.VERSION_CODE || '1', 10);
 if (!Number.isInteger(versionCode) || versionCode < 1) throw new Error('VERSION_CODE no válido');
 patch(gradle, /versionCode\s+\d+/, `versionCode ${versionCode}`, `versionCode ${versionCode}`);

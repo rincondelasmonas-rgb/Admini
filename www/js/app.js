@@ -1,773 +1,1483 @@
-// Archivos — lógica principal. Todo es local: metadatos en IndexedDB, bytes en el sistema de archivos del celular.
+// Archivos — administrador de archivos para Android (Capacitor). Todo es local: sin servidor ni cuentas.
 import {
-  MAX_SIZE, TRASH_MS, esc, norm, splitName, sanitizeName, uniqueName, validateRename, makeId, formatSize, formatDate, formatDateTime,
-  daysLeftLabel, plural, guessMime, effectiveType, category, CATEGORY_LABEL, sortFiles,
+  esc, norm, plural, baseName, parentPath, joinPath, volumeOf, breadcrumbs, displayPath, uniqueName, validateName, formatSize, formatDate,
+  formatDateTime, percent, trashLabel, kind, KIND_LABEL, isZip, isEditable, extOf, sortEntries, extraCopies, DAY_MS,
 } from './util.js';
 import * as db from './db.js';
-import { storage, isNative, plugin } from './fs.js';
+import { Files, isNative, plugin, fileUrl, initProgress, newOpId, watch, isCancel } from './api.js';
 import { icon, hydrateIcons } from './icons.js';
-import { layers, confirmDialog, infoDialog, renameDialog, sheet, progressDialog, snack, toast, hideSnack } from './ui-kit.js';
+import { layers, confirmDialog, infoDialog, choiceDialog, promptDialog, detailsDialog, sheet, progressDialog, snack, toast, hideSnack } from './ui-kit.js';
+import { initViewer, openViewer, closeViewer, viewerEntry, viewerReplace, openEditor } from './viewer.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 
-// ---------------------------------------------------------------- estado
-const store = new Map(); // id -> { id, name, size, type, at, trashedAt }
-const state = { tab: 'all', sort: 'recent', query: '', searchOpen: false, selecting: false, selected: new Set() };
-const pv = { layer: null, ids: [], idx: 0, url: null, tok: 0 };
-let busy = false;
-let suppressClick = false;
+const PAGE = 150; // elementos que se dibujan por tramo
+const CAT_PAGE = 500; // elementos que se piden a la galería por tramo
+const THUMB_MAX = 12 * 1024 * 1024; // miniaturas solo de imágenes de hasta 12 MB
 
-const all = () => Array.from(store.values());
-const get = (id) => store.get(id);
-const isActive = (f) => f.trashedAt == null;
-const THUMB_MAX = 6 * 1024 * 1024;
+const CATS = [
+  { id: 'images', label: 'Imágenes', icon: 'image', cls: 'c-image' },
+  { id: 'videos', label: 'Videos', icon: 'video', cls: 'c-video' },
+  { id: 'audio', label: 'Audio', icon: 'audio', cls: 'c-audio' },
+  { id: 'docs', label: 'Documentos', icon: 'doc', cls: 'c-doc' },
+  { id: 'archives', label: 'Comprimidos', icon: 'archive', cls: 'c-archive' },
+  { id: 'apks', label: 'Apps (APK)', icon: 'apk', cls: 'c-apk' },
+];
+const QUICK = [
+  ['Download', 'Descargas', 'download'], ['DCIM', 'Cámara', 'image'], ['Pictures', 'Imágenes', 'image'], ['Documents', 'Documentos', 'doc'],
+  ['Music', 'Música', 'audio'], ['Movies', 'Películas', 'video'], ['WhatsApp', 'WhatsApp', 'folder'],
+  ['Android/media/com.whatsapp/WhatsApp', 'WhatsApp (media)', 'folder'], ['Telegram', 'Telegram', 'folder'],
+];
+const LIST_ROUTES = new Set(['folder', 'cat', 'recent', 'large', 'search', 'trash', 'dups']);
+const GRID_ROUTES = new Set(['folder', 'cat', 'recent', 'large', 'search']);
 
-const ACTIONS = {
-  share: { label: 'Compartir', short: 'Compartir', icon: 'share' },
-  download: { label: 'Guardar en Descargas', short: 'Descargas', icon: 'download' },
-  rename: { label: 'Renombrar', short: 'Renombrar', icon: 'edit' },
-  trash: { label: 'Mover al basurero', short: 'Basurero', icon: 'trash' },
-  restore: { label: 'Restaurar', short: 'Restaurar', icon: 'restore' },
-  delete: { label: 'Eliminar para siempre', short: 'Eliminar', icon: 'trash', danger: true },
-};
-const SHEET_ACTIVE = ['share', 'download', 'rename', 'trash'];
-const SHEET_TRASH = ['restore', 'delete'];
-const BAR_ACTIVE = ['share', 'download', 'trash'];
-const BAR_TRASH = ['restore', 'delete'];
+// ---------------------------------------------------------------- ajustes y favoritos
+const DEFAULTS = { showHidden: false, foldersFirst: true, view: 'list', sortKey: 'name', sortDir: 'asc', useTrash: true, trashDays: 30 };
 
-function prefGet(k, d) {
+function loadSettings() {
   try {
-    return localStorage.getItem(k) || d;
+    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('archivos.settings') || '{}') };
   } catch (e) {
-    return d;
+    return { ...DEFAULTS };
   }
 }
-function prefSet(k, v) {
+function loadFavs() {
   try {
-    localStorage.setItem(k, v);
+    const a = JSON.parse(localStorage.getItem('archivos.favs') || '[]');
+    return Array.isArray(a) ? a.filter((x) => typeof x === 'string') : [];
+  } catch (e) {
+    return [];
+  }
+}
+function persist(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
   } catch (e) {
     /* sin almacenamiento de preferencias: no pasa nada */
   }
 }
 
-// ---------------------------------------------------------------- datos
-async function commit(records) {
-  await db.putMany(records);
-  records.forEach((r) => store.set(r.id, r));
-}
+// ---------------------------------------------------------------- estado
+const S = {
+  access: null, // null = sin comprobar · true / false
+  volumes: [], counts: null, quickExisting: [], homeRecent: [], trashInfo: null,
+  route: { name: 'home' }, history: [],
+  entries: [], more: false, loading: false, loadingMore: false, error: null, seq: 0, offset: 0,
+  view: [], byPath: new Map(), rendered: 0,
+  selecting: false, selected: new Set(),
+  clip: null, // { mode: 'copy' | 'cut', items: [ruta], count }
+  settings: loadSettings(), favs: loadFavs(),
+  groups: [], query: '', truncated: false, searching: false, searchSeq: 0, searchOps: [], searchTimer: null,
+  busy: false, version: '',
+};
+let suppressClick = false;
+let observer = null;
 
-function activeNames(excludeIds) {
-  const s = new Set();
-  for (const f of store.values()) if (isActive(f) && !(excludeIds && excludeIds.has(f.id))) s.add(f.name.toLowerCase());
-  return s;
-}
+const rname = () => S.route.name;
+const isGrid = () => S.settings.view === 'grid' && GRID_ROUTES.has(rname());
+const trashDays = () => S.settings.trashDays;
+const countText = (n, one, many) => `${n} ${plural(n, one, many)}`;
+const primaryRoot = () => (S.volumes[0] ? S.volumes[0].path : '/storage/emulated/0');
 
-async function removeForever(ids) {
-  for (const id of ids) await storage.remove(id);
-  await db.deleteMany(ids);
-  ids.forEach((id) => {
-    store.delete(id);
-    state.selected.delete(id);
+// ---------------------------------------------------------------- operaciones con progreso y cancelar
+async function runOp(title, fn, { bytes = false } = {}) {
+  const opId = newOpId();
+  let dlg = null;
+  const timer = setTimeout(() => {
+    dlg = progressDialog({ title, onCancel: () => Files.cancel({ opId }).catch(() => {}) });
+    dlg.update({ name: '', fraction: null, text: '' });
+  }, 400); // si termina rápido, nunca se ve el diálogo
+  const off = watch(opId, (e) => {
+    if (!dlg) return;
+    const frac = e.total > 0 ? e.done / e.total : null;
+    dlg.update({ name: e.name || '', fraction: frac, text: e.total > 0 ? (bytes ? `${formatSize(e.done)} de ${formatSize(e.total)}` : `${Math.min(e.done, e.total)} de ${e.total}`) : '' });
   });
-  if (state.selecting && state.selected.size === 0) state.selecting = false;
-  if (pv.layer && pv.ids[pv.idx] && ids.includes(pv.ids[pv.idx])) closePreview();
-  render();
-}
-
-/** Borra del basurero lo que lleva 30 días o más. */
-async function purgeExpired() {
-  const now = Date.now();
-  const expired = all().filter((f) => f.trashedAt != null && now - f.trashedAt >= TRASH_MS);
-  if (!expired.length) return 0;
-  await removeForever(expired.map((f) => f.id));
-  const n = expired.length;
-  toast(`Se ${plural(n, 'eliminó 1 archivo', `eliminaron ${n} archivos`)} del basurero (más de 30 días).`);
-  return n;
-}
-
-/** Quita archivos huérfanos (subidas interrumpidas) y registros sin archivo. Solo al abrir la app. */
-async function reconcile() {
-  const names = await storage.listIds();
-  if (!names) return;
-  const present = new Set(names);
-  const orphans = names.filter((n) => !store.has(n));
-  for (const n of orphans) await storage.remove(n);
-  const missing = all().filter((f) => !present.has(f.id));
-  if (missing.length) {
-    await db.deleteMany(missing.map((f) => f.id));
-    missing.forEach((f) => store.delete(f.id));
-    toast(`Se limpiaron ${missing.length} ${plural(missing.length, 'registro', 'registros')} sin archivo.`);
+  try {
+    return await fn(opId);
+  } finally {
+    clearTimeout(timer);
+    off();
+    if (dlg) dlg.close();
   }
 }
 
-// ---------------------------------------------------------------- vista
-function visibleList() {
-  const trashView = state.tab === 'trash';
-  const q = norm(state.query.trim());
-  let arr = all().filter((f) => (trashView ? !isActive(f) : isActive(f)));
-  if (q) arr = arr.filter((f) => norm(f.name).includes(q));
-  return sortFiles(arr, state.sort, trashView);
-}
-
-function thumbHtml(f) {
-  const cat = category(f);
-  let img = '';
-  if (cat === 'image' && f.size <= THUMB_MAX) {
-    const u = storage.thumbUrl(f);
-    if (u) img = `<img src="${esc(u)}" alt="" loading="lazy" decoding="async">`;
-  }
-  return `<div class="thumb c-${cat}">${icon(cat)}${img}</div>`;
-}
-
-function itemHtml(f, now) {
-  const trashView = state.tab === 'trash';
-  const sel = state.selected.has(f.id);
-  const meta = trashView
-    ? `${formatSize(f.size)} · ${daysLeftLabel(f.trashedAt, now)}`
-    : `${formatSize(f.size)} · ${formatDate(f.at)}`;
-  const trail = state.selecting
-    ? `<span class="check"><i>${icon('check')}</i></span>`
-    : `<button type="button" class="icon-btn" data-more aria-label="Más opciones de ${esc(f.name)}">${icon('more')}</button>`;
-  return `<li class="item ${sel ? 'selected' : ''}" data-id="${esc(f.id)}" role="listitem" ${state.selecting ? `aria-selected="${sel}"` : ''}>
-    ${thumbHtml(f)}
-    <div class="meta"><div class="name">${esc(f.name)}</div><div class="sub">${esc(meta)}</div></div>${trail}</li>`;
-}
-
-function emptyHtml() {
-  const trashView = state.tab === 'trash';
-  const q = state.query.trim();
-  if (q) {
-    return `<div class="badge">${icon('search')}</div><h2>Sin resultados</h2><p>No hay archivos que coincidan con “${esc(q)}”.</p>`;
-  }
-  if (trashView) {
-    return `<div class="badge">${icon('trash')}</div><h2>El basurero está vacío</h2><p>Los archivos que muevas aquí se borran solos a los 30 días.</p>`;
-  }
-  return `<div class="badge">${icon('empty')}</div><h2>Aún no hay archivos</h2><p>Sube archivos desde tu teléfono (máx. 20 MB cada uno).</p>
-    <button type="button" class="btn primary" data-upload>${icon('plus')}Subir archivos</button>`;
-}
-
-function render() {
-  const files = all();
-  const act = files.filter(isActive);
-  const tr = files.filter((f) => !isActive(f));
-  const total = files.reduce((s, f) => s + f.size, 0);
-  const trSize = tr.reduce((s, f) => s + f.size, 0);
-  const trashView = state.tab === 'trash';
-
-  $('#cntAll').textContent = String(act.length);
-  $('#cntTrash').textContent = String(tr.length);
-  $('#storageText').textContent = files.length
-    ? `${formatSize(total)} usados${tr.length ? ` · ${formatSize(trSize)} en el basurero` : ''}`
-    : 'Sin archivos todavía';
-
-  document.querySelectorAll('.tab').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === state.tab)));
-  document.querySelectorAll('.seg-btn').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.sort === state.sort)));
-
-  const list = visibleList();
-  const now = Date.now();
-  $('#list').innerHTML = list.map((f) => itemHtml(f, now)).join('');
-  const empty = $('#empty');
-  empty.classList.toggle('hidden', list.length > 0);
-  if (!list.length) empty.innerHTML = emptyHtml();
-
-  $('#trashBanner').classList.toggle('hidden', !(trashView && tr.length > 0));
-
-  // cabecera según modo
-  $('#tbNormal').classList.toggle('hidden', state.selecting);
-  $('#tbSelect').classList.toggle('hidden', !state.selecting);
-  $('#searchRow').classList.toggle('hidden', !state.searchOpen || state.selecting);
-  $('#btnSearch').classList.toggle('hidden', false);
-  if (state.selecting) {
-    const n = state.selected.size;
-    $('#selCount').textContent = `${n} ${plural(n, 'seleccionado', 'seleccionados')}`;
-  }
-
-  // acciones inferiores
-  const bar = $('#selbar');
-  bar.classList.toggle('hidden', !state.selecting);
-  if (state.selecting) {
-    const keys = trashView ? BAR_TRASH : BAR_ACTIVE;
-    bar.innerHTML = keys
-      .map((k) => `<button type="button" class="act ${ACTIONS[k].danger ? 'danger' : ''}" data-act="${k}">${icon(ACTIONS[k].icon)}<span>${ACTIONS[k].short}</span></button>`)
-      .join('');
-  }
-  const fabOn = !trashView && !state.selecting;
-  $('#fab').classList.toggle('hidden', !fabOn);
-  document.body.classList.toggle('fab-on', fabOn);
-  document.body.classList.toggle('selecting', state.selecting);
-}
-
-// ---------------------------------------------------------------- selección
-function enterSelection(id) {
-  state.selecting = true;
-  state.selected = new Set([id]);
-  hideSnack();
-  render();
-}
-function exitSelection() {
-  if (!state.selecting) return;
-  state.selecting = false;
-  state.selected.clear();
-  render();
-}
-function toggleSelect(id) {
-  if (state.selected.has(id)) state.selected.delete(id);
-  else state.selected.add(id);
-  if (state.selected.size === 0) state.selecting = false;
-  render();
-}
-function selectAll() {
-  const ids = visibleList().map((f) => f.id);
-  const allOn = ids.length > 0 && ids.every((id) => state.selected.has(id));
-  state.selected = allOn ? new Set() : new Set(ids);
-  if (state.selected.size === 0) state.selecting = false;
-  render();
-}
-
-// ---------------------------------------------------------------- acciones
 async function guarded(fn) {
-  if (busy) return;
-  busy = true;
+  if (S.busy) return;
+  S.busy = true;
   try {
     await fn();
   } catch (e) {
-    console.error(e);
-    toast('Algo salió mal. Inténtalo de nuevo.');
-  } finally {
-    busy = false;
-  }
-}
-
-const isCancel = (e) => /cancel|abort/i.test((e && (e.message || e.name)) || String(e));
-
-function trunc(s, n = 28) {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
-}
-
-async function restoreSnapshots(snaps) {
-  const ids = new Set(snaps.map((s) => s.id));
-  const taken = activeNames(ids);
-  const out = [];
-  for (const s of snaps) {
-    if (!store.has(s.id)) continue; // ya se eliminó definitivamente
-    const rec = { ...s };
-    if (rec.trashedAt == null) {
-      rec.name = uniqueName(rec.name, taken);
-      taken.add(rec.name.toLowerCase());
-    }
-    out.push(rec);
-  }
-  if (out.length) await commit(out);
-  render();
-}
-
-async function doTrash(ids) {
-  const items = ids.map(get).filter((f) => f && isActive(f));
-  if (!items.length) return;
-  const snaps = items.map((f) => ({ ...f }));
-  const now = Date.now();
-  await commit(items.map((f) => ({ ...f, trashedAt: now })));
-  state.selecting = false;
-  state.selected.clear();
-  if (pv.layer) closePreview();
-  render();
-  const msg = items.length === 1 ? `“${trunc(items[0].name)}” movido al basurero` : `${items.length} archivos movidos al basurero`;
-  snack(msg, { action: 'Deshacer', onAction: () => guarded(() => restoreSnapshots(snaps)) });
-}
-
-async function doRestore(ids) {
-  const items = ids.map(get).filter((f) => f && !isActive(f));
-  if (!items.length) return;
-  const snaps = items.map((f) => ({ ...f }));
-  const taken = activeNames(new Set(items.map((f) => f.id)));
-  let renamed = 0;
-  const out = items.map((f) => {
-    const name = uniqueName(f.name, taken);
-    taken.add(name.toLowerCase());
-    if (name !== f.name) renamed++;
-    return { ...f, name, trashedAt: null };
-  });
-  await commit(out);
-  state.selecting = false;
-  state.selected.clear();
-  if (pv.layer) closePreview();
-  render();
-  let msg = items.length === 1 ? `“${trunc(out[0].name)}” restaurado` : `${items.length} archivos restaurados`;
-  if (renamed) msg += ` (${renamed} ${plural(renamed, 'renombrado', 'renombrados')} por duplicado)`;
-  snack(msg, { action: 'Deshacer', onAction: () => guarded(() => restoreSnapshots(snaps)) });
-}
-
-async function doDelete(ids) {
-  const items = ids.map(get).filter((f) => f && !isActive(f));
-  if (!items.length) return;
-  const size = items.reduce((s, f) => s + f.size, 0);
-  const ok = await confirmDialog({
-    title: '¿Eliminar para siempre?',
-    message:
-      items.length === 1
-        ? `“${items[0].name}” (${formatSize(size)}) se eliminará definitivamente. No se puede deshacer.`
-        : `${items.length} archivos (${formatSize(size)}) se eliminarán definitivamente. No se puede deshacer.`,
-    confirmText: 'Eliminar',
-    danger: true,
-  });
-  if (!ok) return;
-  await removeForever(items.map((f) => f.id));
-  toast(items.length === 1 ? 'Archivo eliminado' : `${items.length} archivos eliminados`);
-}
-
-async function doEmptyTrash() {
-  const items = all().filter((f) => !isActive(f));
-  if (!items.length) return;
-  const size = items.reduce((s, f) => s + f.size, 0);
-  const ok = await confirmDialog({
-    title: '¿Vaciar el basurero?',
-    message: `Se eliminarán para siempre ${items.length} ${plural(items.length, 'archivo', 'archivos')} (${formatSize(size)}). No se puede deshacer.`,
-    confirmText: 'Vaciar',
-    danger: true,
-  });
-  if (!ok) return;
-  await removeForever(items.map((f) => f.id));
-  toast('Basurero vacío');
-}
-
-async function doRename(id) {
-  const f = get(id);
-  if (!f || !isActive(f)) return;
-  const { base, ext } = splitName(f.name);
-  const taken = activeNames(new Set([f.id]));
-  const res = await renameDialog({ title: 'Renombrar', base, ext, validate: (b) => validateRename(b, ext, taken) });
-  if (res == null) return;
-  const name = res + ext;
-  if (name === f.name) return;
-  await commit([{ ...f, name }]);
-  render();
-  if (pv.layer) showPreviewItem();
-  toast('Archivo renombrado');
-}
-
-async function doShare(ids) {
-  const items = ids.map(get).filter(Boolean);
-  if (!items.length) return;
-  if (items.length > 2) toast('Preparando archivos…');
-  try {
-    await storage.share(items);
-  } catch (e) {
-    if (isCancel(e)) return;
-    console.error(e);
-    toast('No se pudo abrir la hoja de compartir.');
-  }
-  exitSelection();
-}
-
-async function doDownload(ids) {
-  const items = ids.map(get).filter(Boolean);
-  if (!items.length) return;
-  const saved = [];
-  const failed = [];
-  for (const f of items) {
-    try {
-      const r = await storage.saveToDownloads(f);
-      saved.push((r && r.name) || f.name);
-    } catch (e) {
+    if (isCancel(e)) {
+      toast('Operación cancelada');
+      await reloadCurrent().catch(() => {});
+    } else {
       console.error(e);
-      failed.push(f.name);
-    }
-  }
-  if (failed.length) {
-    await infoDialog({
-      title: 'No se pudieron guardar algunos archivos',
-      message: saved.length ? `${saved.length} ${plural(saved.length, 'archivo se guardó', 'archivos se guardaron')} en Descargas.` : '',
-      lines: failed,
-    });
-  } else {
-    toast(saved.length === 1 ? `Guardado en Descargas: ${trunc(saved[0], 34)}` : `${saved.length} archivos guardados en Descargas`);
-  }
-  exitSelection();
-}
-
-function runAction(act, ids) {
-  guarded(async () => {
-    switch (act) {
-      case 'share': return doShare(ids);
-      case 'download': return doDownload(ids);
-      case 'rename': return doRename(ids[0]);
-      case 'trash': return doTrash(ids);
-      case 'restore': return doRestore(ids);
-      case 'delete': return doDelete(ids);
-      default: return undefined;
-    }
-  });
-}
-
-async function openItemMenu(id) {
-  const f = get(id);
-  if (!f) return;
-  const keys = isActive(f) ? SHEET_ACTIVE : SHEET_TRASH;
-  const choice = await sheet({
-    title: f.name,
-    subtitle: `${formatSize(f.size)} · ${CATEGORY_LABEL[category(f)]}`,
-    items: keys.map((k) => ({ id: k, label: ACTIONS[k].label, icon: ACTIONS[k].icon, danger: !!ACTIONS[k].danger })),
-  });
-  if (choice) runAction(choice, [id]);
-}
-
-// ---------------------------------------------------------------- subida
-async function handleFiles(fileList) {
-  const files = Array.from(fileList || []);
-  if (!files.length) return;
-  const problems = [];
-  let ok = 0;
-  let renamed = 0;
-  let cancelled = false;
-  const dlg = progressDialog({ title: 'Subiendo archivos', onCancel: () => (cancelled = true) });
-  try {
-    for (let i = 0; i < files.length; i++) {
-      if (cancelled) break;
-      const file = files[i];
-      const shown = file.name || 'archivo';
-      dlg.update({ index: i, total: files.length, name: shown, fraction: 0 });
-      if (file.size > MAX_SIZE) {
-        problems.push(`${shown}: pesa ${formatSize(file.size)} y el máximo es 20 MB.`);
-        continue;
-      }
-      if (file.size === 0) {
-        problems.push(`${shown}: está vacío.`);
-        continue;
-      }
-      const clean = sanitizeName(file.name);
-      const name = uniqueName(clean, activeNames());
-      const id = makeId(name);
-      try {
-        await storage.write(id, file, (fraction) => dlg.update({ index: i, total: files.length, name: shown, fraction }));
-      } catch (e) {
-        console.error(e);
-        await storage.remove(id);
-        problems.push(`${shown}: no se pudo guardar.`);
-        continue;
-      }
-      const rec = { id, name, size: file.size, type: file.type || guessMime(name), at: Date.now(), trashedAt: null };
-      try {
-        await db.put(rec);
-      } catch (e) {
-        console.error(e);
-        await storage.remove(id);
-        problems.push(`${shown}: no se pudo registrar.`);
-        continue;
-      }
-      store.set(id, rec);
-      if (name !== clean) renamed++;
-      ok++;
-      render();
+      await infoDialog({ title: 'No se pudo completar', message: (e && e.message) || 'Algo salió mal. Inténtalo de nuevo.' });
     }
   } finally {
-    dlg.close();
-    $('#picker').value = '';
+    S.busy = false;
   }
-  if (ok) {
-    let msg = `${ok} ${plural(ok, 'archivo subido', 'archivos subidos')}`;
-    if (renamed) msg += ` · ${renamed} ${plural(renamed, 'renombrado', 'renombrados')} por duplicado`;
-    toast(msg);
-  }
-  if (cancelled && !problems.length) toast(ok ? `Subida cancelada. ${ok} ${plural(ok, 'archivo subido', 'archivos subidos')}.` : 'Subida cancelada');
-  if (problems.length) {
-    await infoDialog({
-      title: ok ? 'Algunos archivos no se subieron' : 'No se pudo subir',
-      message: 'Los demás se subieron con normalidad.',
-      lines: problems,
+}
+
+function reportFailures(title, failed) {
+  if (!failed || !failed.length) return Promise.resolve();
+  return infoDialog({ title, lines: failed.map((f) => `${f.name}: ${f.reason}`) });
+}
+
+// ---------------------------------------------------------------- carga de datos por ruta
+function toTrashEntry(t) {
+  return { name: t.name, path: t.path, dir: t.dir, size: t.size, mtime: t.deletedAt, deletedAt: t.deletedAt, orig: t.orig, trash: true };
+}
+
+async function loadHome(seq) {
+  const alive = () => seq === S.seq && rname() === 'home';
+  const vols = await Files.getVolumes();
+  S.volumes = vols.volumes;
+  if (!alive()) return;
+  renderAll();
+  const paths = QUICK.map((q) => joinPath(primaryRoot(), q[0])).concat(S.favs);
+  const jobs = [
+    Files.existsMany({ paths }).then((r) => { S.quickExisting = r.existing; }),
+    Files.categoryCounts().then((c) => { S.counts = c; }),
+    Files.recent({ limit: 6 }).then((r) => { S.homeRecent = r.entries; }),
+    Files.trashList().then((r) => { S.trashInfo = { count: r.entries.length, size: r.entries.reduce((s, t) => s + (t.size || 0), 0) }; }),
+  ];
+  for (const j of jobs) {
+    j.catch((e) => console.error(e)).finally(() => {
+      if (alive()) renderView();
     });
   }
+  await Promise.allSettled(jobs);
 }
 
-// ---------------------------------------------------------------- vista previa
-function releasePreviewUrl() {
-  if (pv.url) storage.release(pv.url);
-  pv.url = null;
-}
-
-function cardHtml(f, note) {
-  const cat = category(f);
-  const rows = [
-    ['Tamaño', formatSize(f.size)],
-    ['Tipo', `${CATEGORY_LABEL[cat]} (${effectiveType(f)})`],
-    ['Subido', formatDateTime(f.at)],
-  ];
-  if (!isActive(f)) rows.push(['En el basurero desde', formatDateTime(f.trashedAt)], ['Estado', daysLeftLabel(f.trashedAt)]);
-  return `<div class="pv-card"><div class="pv-fileicon c-${cat}">${icon(cat)}</div><h2>${esc(f.name)}</h2>
-    ${note ? `<p class="note">${esc(note)}</p>` : ''}
-    <dl>${rows.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}</dl></div>`;
-}
-
-function renderPreviewActions(f) {
-  const keys = isActive(f) ? SHEET_ACTIVE : SHEET_TRASH;
-  $('#pvActions').innerHTML = keys
-    .map((k) => `<button type="button" class="act ${ACTIONS[k].danger ? 'danger' : ''}" data-act="${k}">${icon(ACTIONS[k].icon)}<span>${ACTIONS[k].short}</span></button>`)
-    .join('');
-}
-
-async function showPreviewItem() {
-  const tok = ++pv.tok;
-  const f = get(pv.ids[pv.idx]);
-  if (!f) return closePreview();
-  const body = $('#pvBody');
-  body.classList.remove('zoom');
-  releasePreviewUrl();
-  body.innerHTML = '';
-  $('#pvName').textContent = f.name;
-  $('#pvInfo').textContent = `${formatSize(f.size)} · ${CATEGORY_LABEL[category(f)]} · ${formatDate(f.at)}`;
-  $('#pvPrev').classList.toggle('hidden', pv.ids.length < 2);
-  $('#pvNext').classList.toggle('hidden', pv.ids.length < 2);
-  renderPreviewActions(f);
-
-  const cat = category(f);
-  if (cat !== 'image' && cat !== 'video' && cat !== 'audio') {
-    body.innerHTML = cardHtml(f);
-    return;
-  }
-  let url;
+async function load() {
+  const r = S.route;
+  const seq = ++S.seq;
+  S.loading = true;
+  S.error = null;
+  S.offset = 0;
   try {
-    url = await storage.mediaUrl(f);
+    switch (r.name) {
+      case 'home':
+        await loadHome(seq);
+        break;
+      case 'folder': {
+        const res = await Files.list({ path: r.path, showHidden: S.settings.showHidden });
+        if (seq === S.seq) S.entries = res.entries;
+        break;
+      }
+      case 'cat': {
+        const res = await Files.category({ type: r.type, limit: CAT_PAGE, offset: 0 });
+        if (seq === S.seq) {
+          S.entries = res.entries;
+          S.more = res.more;
+          S.offset = CAT_PAGE;
+        }
+        break;
+      }
+      case 'recent': {
+        const res = await Files.recent({ limit: 100 });
+        if (seq === S.seq) S.entries = res.entries;
+        break;
+      }
+      case 'large': {
+        const res = await Files.largest({ minSize: 50 * 1024 * 1024, limit: 150 });
+        if (seq === S.seq) S.entries = res.entries;
+        break;
+      }
+      case 'trash': {
+        const res = await Files.trashList();
+        if (seq === S.seq) S.entries = res.entries.map(toTrashEntry).sort((a, b) => b.deletedAt - a.deletedAt);
+        break;
+      }
+      case 'dups':
+        if (seq === S.seq && !r.scanned) {
+          r.scanned = true;
+          await scanDuplicates(seq);
+        }
+        break;
+      default:
+        break;
+    }
   } catch (e) {
-    if (tok === pv.tok) body.innerHTML = cardHtml(f, 'No se pudo abrir el archivo.');
-    return;
+    if (seq === S.seq && !isCancel(e)) {
+      console.error(e);
+      S.error = (e && e.message) || 'No se pudo cargar.';
+    }
+  } finally {
+    if (seq === S.seq) S.loading = false;
   }
-  if (tok !== pv.tok) {
-    storage.release(url);
-    return;
-  }
-  pv.url = url;
-  const fail = () => {
-    if (tok !== pv.tok) return;
-    body.innerHTML = cardHtml(f, 'No se pudo mostrar la vista previa en este teléfono.');
-  };
-  let el;
-  if (cat === 'image') {
-    el = document.createElement('img');
-    el.className = 'pv-img';
-    el.alt = f.name;
-    el.addEventListener('click', () => body.classList.toggle('zoom'));
-  } else if (cat === 'video') {
-    el = document.createElement('video');
-    el.controls = true;
-    el.playsInline = true;
-    el.preload = 'metadata';
-  } else {
-    const wrap = document.createElement('div');
-    wrap.className = 'pv-audio';
-    wrap.innerHTML = `<div class="pv-fileicon c-audio">${icon('audio')}</div>`;
-    el = document.createElement('audio');
-    el.controls = true;
-    el.preload = 'metadata';
-    wrap.appendChild(el);
-    el.addEventListener('error', fail);
-    el.src = url;
-    body.appendChild(wrap);
-    return;
-  }
-  el.addEventListener('error', fail);
-  el.src = url;
-  body.appendChild(el);
 }
 
-function openPreview(id) {
-  const ids = visibleList().map((f) => f.id);
-  const idx = ids.indexOf(id);
-  if (idx < 0) return;
-  pv.ids = ids;
-  pv.idx = idx;
-  if (!pv.layer) {
-    pv.layer = layers.push(closePreview);
-    $('#preview').classList.remove('hidden');
-  }
-  showPreviewItem();
+async function reloadCurrent() {
+  const top = $('#content').scrollTop;
+  if (rname() === 'search') await runSearch();
+  else if (rname() === 'dups') {
+    S.route.scanned = false;
+    await load();
+  } else await load();
+  renderAll();
+  $('#content').scrollTop = top;
 }
 
-function stepPreview(d) {
-  if (pv.ids.length < 2) return;
-  pv.idx = (pv.idx + d + pv.ids.length) % pv.ids.length;
-  showPreviewItem();
+// ---------------------------------------------------------------- navegación
+function resetRouteState() {
+  S.entries = [];
+  S.more = false;
+  S.error = null;
+  S.groups = [];
+  S.query = '';
+  S.truncated = false;
+  S.searching = false;
+  S.selecting = false;
+  S.selected.clear();
+  S.rendered = 0;
 }
 
-function closePreview() {
-  if (!pv.layer) return;
-  layers.remove(pv.layer);
-  pv.layer = null;
-  pv.tok++;
-  const body = $('#pvBody');
-  body.querySelectorAll('video,audio').forEach((m) => {
-    m.pause();
-    m.removeAttribute('src');
-    m.load();
-  });
-  body.innerHTML = '';
-  releasePreviewUrl();
-  $('#preview').classList.add('hidden');
-}
-
-// ---------------------------------------------------------------- navegación y búsqueda
-function setTab(tab) {
-  if (state.tab === tab) return;
-  state.tab = tab;
-  state.selecting = false;
-  state.selected.clear();
+async function go(route, { push = true } = {}) {
   hideSnack();
+  if (push) S.history.push(S.route);
+  S.route = route;
+  resetRouteState();
   $('#content').scrollTop = 0;
-  render();
+  S.loading = !['search', 'settings', 'clean'].includes(route.name);
+  renderAll();
+  if (route.name === 'search') {
+    setTimeout(() => {
+      const i = $('#searchInput');
+      if (i) i.focus();
+    }, 60);
+    return;
+  }
+  await load();
+  renderAll();
 }
 
-function setSort(sort) {
-  state.sort = sort;
-  prefSet('archivos.sort', sort);
-  render();
+function goBack() {
+  if (S.history.length) return go(S.history.pop(), { push: false });
+  if (rname() !== 'home') return go({ name: 'home' }, { push: false });
+  return undefined;
 }
 
-function openSearch() {
-  state.searchOpen = true;
-  render();
-  $('#searchInput').focus();
-}
-function closeSearch() {
-  state.searchOpen = false;
-  state.query = '';
-  $('#searchInput').value = '';
-  render();
+function openFolder(path) {
+  go({ name: 'folder', path });
 }
 
 /** Botón Atrás de Android: de lo más superficial a lo más profundo; al final, salir. */
 function onBack() {
   if (layers.closeTop()) return;
-  if (state.selecting) return exitSelection();
-  if (state.searchOpen || state.query) return closeSearch();
-  if (state.tab === 'trash') return setTab('all');
+  if (S.selecting) return exitSelection();
+  if (S.access === false) return exitApp();
+  if (S.history.length || rname() !== 'home') return goBack();
+  return exitApp();
+}
+
+function exitApp() {
   const App = plugin('App');
-  if (App && App.exitApp) App.exitApp();
+  if (isNative && App && App.exitApp) App.exitApp();
+}
+
+// ---------------------------------------------------------------- vista calculada
+function computeView() {
+  const n = rname();
+  let list = S.entries;
+  if (n === 'folder' || n === 'search') list = sortEntries(list, { key: S.settings.sortKey, dir: S.settings.sortDir }, S.settings.foldersFirst);
+  if (n === 'dups') list = S.groups.flatMap((g) => g.items);
+  S.view = list;
+  S.byPath = new Map(list.map((e) => [e.path, e]));
+}
+
+function pruneSelection() {
+  for (const p of [...S.selected]) if (!S.byPath.has(p)) S.selected.delete(p);
+  if (S.selecting && S.selected.size === 0) S.selecting = false;
+}
+
+// ---------------------------------------------------------------- dibujo
+function renderAll() {
+  computeView();
+  renderTopbar();
+  renderCrumbs();
+  renderBanner();
+  renderView();
+  renderBars();
+  document.body.classList.toggle('selecting', S.selecting);
+}
+
+const tbBtn = (a, ic, label, cls = '') => `<button type="button" class="icon-btn ${cls}" data-a="${a}" aria-label="${label}">${icon(ic)}</button>`;
+
+function titleOf() {
+  const r = S.route;
+  switch (r.name) {
+    case 'folder': {
+      const crumbs = breadcrumbs(r.path, S.volumes);
+      return crumbs[crumbs.length - 1].label;
+    }
+    case 'cat': return (CATS.find((c) => c.id === r.type) || {}).label || 'Categoría';
+    case 'recent': return 'Recientes';
+    case 'large': return 'Archivos grandes';
+    case 'trash': return 'Papelera';
+    case 'clean': return 'Limpieza';
+    case 'dups': return 'Duplicados';
+    case 'settings': return 'Ajustes';
+    default: return 'Archivos';
+  }
+}
+
+function renderTopbar() {
+  const tb = $('#topbar');
+  if (S.access === false) {
+    tb.innerHTML = '<div class="tb-row"><div class="tb-title"><h1>Archivos</h1></div></div>';
+    return;
+  }
+  if (S.selecting) {
+    tb.innerHTML = `<div class="tb-row">${tbBtn('selclose', 'x', 'Salir de la selección')}<div class="tb-title sel-count" aria-live="polite">${countText(S.selected.size, 'seleccionado', 'seleccionados')}</div>${tbBtn('selall', 'checkall', 'Seleccionar todo')}</div>`;
+    return;
+  }
+  const n = rname();
+  if (n === 'home') {
+    const v = S.volumes[0];
+    const sub = v ? `${formatSize(v.total - v.free)} usados de ${formatSize(v.total)}` : '';
+    tb.innerHTML = `<div class="tb-row"><div class="tb-title"><h1>Archivos</h1><p class="tb-sub">${esc(sub)}</p></div>${tbBtn('search', 'search', 'Buscar')}${tbBtn('settings', 'settings', 'Ajustes')}</div>`;
+    return;
+  }
+  if (n === 'search') {
+    tb.innerHTML = `<div class="tb-row">${tbBtn('back', 'back', 'Volver')}<div class="search-field"><span class="search-ic">${icon('search')}</span><input id="searchInput" type="search" inputmode="search" placeholder="${esc(S.route.root ? `Buscar en ${baseName(S.route.root)}` : 'Buscar en todo el almacenamiento')}" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Buscar"><button type="button" class="icon-btn small" data-a="clearsearch" aria-label="Borrar búsqueda">${icon('x')}</button></div></div>`;
+    $('#searchInput').value = S.query;
+    return;
+  }
+  let sub = '';
+  if (n === 'folder' && !S.loading) sub = countText(S.view.length, 'elemento', 'elementos');
+  if (n === 'trash' && S.entries.length) sub = `${countText(S.entries.length, 'elemento', 'elementos')} · ${formatSize(S.entries.reduce((s, e) => s + e.size, 0))}`;
+  let right = '';
+  if (n === 'folder') right = tbBtn('search', 'search', 'Buscar aquí') + tbBtn('view', S.settings.view === 'grid' ? 'list' : 'grid', 'Cambiar vista') + tbBtn('more', 'more', 'Más opciones');
+  else if (GRID_ROUTES.has(n)) right = tbBtn('view', S.settings.view === 'grid' ? 'list' : 'grid', 'Cambiar vista');
+  else if (n === 'trash') right = tbBtn('more', 'more', 'Más opciones');
+  tb.innerHTML = `<div class="tb-row">${tbBtn('back', 'back', 'Volver')}<div class="tb-title"><h1 class="sm">${esc(titleOf())}</h1>${sub ? `<p class="tb-sub">${esc(sub)}</p>` : ''}</div>${right}</div>`;
+}
+
+function renderCrumbs() {
+  const el = $('#crumbs');
+  const show = rname() === 'folder' && !S.selecting && S.access;
+  el.classList.toggle('hidden', !show);
+  if (!show) return;
+  const parts = breadcrumbs(S.route.path, S.volumes);
+  el.innerHTML = parts
+    .map((c, i) => `${i ? `<span class="crumb-sep">${icon('chevron')}</span>` : ''}<button type="button" class="crumb ${i === parts.length - 1 ? 'on' : ''}" data-crumb="${esc(c.path)}">${esc(c.label)}</button>`)
+    .join('');
+  el.scrollLeft = el.scrollWidth;
+}
+
+function renderBanner() {
+  const el = $('#banner');
+  const n = rname();
+  let html = '';
+  if (n === 'trash' && S.entries.length) {
+    html = `<span>${trashDays() ? `Se eliminan solos a los ${trashDays()} días.` : 'Se quedan aquí hasta que vacíes la papelera.'}</span><button type="button" class="btn text danger-text" data-b="empty">Vaciar</button>`;
+  } else if (n === 'search') {
+    if (S.searching) html = '<span>Buscando…</span>';
+    else if (S.query.trim()) html = `<span>${countText(S.entries.length, 'resultado', 'resultados')}${S.truncated ? ' (hay más: escribe más letras para afinar)' : ''}</span>`;
+    else html = '<span>Escribe el nombre de lo que buscas.</span>';
+  } else if (n === 'dups' && S.groups.length) {
+    const waste = S.groups.reduce((s, g) => s + g.size * (g.items.length - 1), 0);
+    html = `<span>${countText(S.groups.length, 'grupo', 'grupos')} · puedes liberar ${formatSize(waste)}</span><button type="button" class="btn text" data-b="extras">Elegir copias</button>`;
+  } else if (n === 'large') {
+    html = '<span>Archivos de 50 MB o más, de mayor a menor.</span>';
+  }
+  el.classList.toggle('hidden', !html || S.selecting);
+  el.innerHTML = html;
+}
+
+// --- vista principal
+function thumbHtml(e) {
+  const k = kind(e);
+  const img = k === 'image' && e.size <= THUMB_MAX ? `<img src="${esc(fileUrl(e.path))}" alt="" loading="lazy" decoding="async">` : '';
+  return `<div class="thumb c-${k}">${icon(k)}${img}</div>`;
+}
+
+function subText(e) {
+  if (e.trash) return `${formatSize(e.size)} · ${trashLabel(e.deletedAt, trashDays())}`;
+  if (e.dir) return `${countText(e.count || 0, 'elemento', 'elementos')} · ${formatDate(e.mtime)}`;
+  return `${formatSize(e.size)} · ${formatDate(e.mtime)}`;
+}
+
+function pathLine(e) {
+  const n = rname();
+  if (n === 'folder' || isGrid()) return '';
+  const where = e.trash ? e.orig && parentPath(e.orig) : parentPath(e.path);
+  return where ? `<div class="path">${esc(displayPath(where, S.volumes))}</div>` : '';
+}
+
+function itemHtml(e) {
+  const sel = S.selected.has(e.path);
+  return `<li class="item${sel ? ' selected' : ''}" data-path="${esc(e.path)}" role="listitem">
+    ${thumbHtml(e)}
+    <div class="meta"><div class="name">${esc(e.name)}</div><div class="sub">${esc(subText(e))}</div>${pathLine(e)}</div>
+    <span class="trail"><span class="check"><i>${icon('check')}</i></span><button type="button" class="icon-btn more-btn" data-more aria-label="Más opciones de ${esc(e.name)}">${icon('more')}</button></span></li>`;
+}
+
+function groupsHtml() {
+  return S.groups
+    .map(
+      (g) => `<li class="group-head">${icon('dup')}<span>${countText(g.items.length, 'copia', 'copias')} · ${formatSize(g.size)} cada una</span></li>${g.items.map(itemHtml).join('')}`
+    )
+    .join('');
+}
+
+function emptyHtml() {
+  const n = rname();
+  let ic = 'empty';
+  let title = 'Aquí no hay nada';
+  let text = '';
+  let extra = '';
+  if (S.error) {
+    ic = 'x';
+    title = 'No se pudo abrir';
+    text = S.error;
+    extra = '<button type="button" class="btn primary" data-a="retry">Reintentar</button>';
+  } else if (n === 'trash') {
+    ic = 'trash';
+    title = 'La papelera está vacía';
+    text = trashDays() ? `Lo que elimines aparece aquí y se borra solo a los ${trashDays()} días.` : 'Lo que elimines aparece aquí hasta que la vacíes.';
+  } else if (n === 'search') {
+    ic = 'search';
+    title = S.query.trim() ? 'Sin resultados' : 'Buscar';
+    text = S.query.trim() ? `No hay nada que coincida con “${S.query.trim()}”.` : '';
+  } else if (n === 'dups') {
+    ic = 'dup';
+    title = 'No hay duplicados';
+    text = 'No se encontraron archivos repetidos.';
+  } else if (n === 'folder') {
+    ic = 'folder';
+    title = 'Carpeta vacía';
+    text = 'Toca ⋮ para crear una carpeta o un archivo de texto.';
+  } else if (n === 'large') {
+    title = 'Nada pesado';
+    text = 'No hay archivos de 50 MB o más.';
+  }
+  return `<div class="empty"><div class="badge">${icon(ic)}</div><h2>${esc(title)}</h2>${text ? `<p>${esc(text)}</p>` : ''}${extra}</div>`;
+}
+
+function appendChunk() {
+  const list = $('#list');
+  if (!list || S.rendered >= S.view.length) return;
+  const to = Math.min(S.view.length, S.rendered + PAGE);
+  list.insertAdjacentHTML('beforeend', S.view.slice(S.rendered, to).map(itemHtml).join(''));
+  S.rendered = to;
+}
+
+function armSentinel() {
+  if (observer) observer.disconnect();
+  const sentinel = $('#sentinel');
+  if (!sentinel || !('IntersectionObserver' in window)) return;
+  observer = new IntersectionObserver((entries) => {
+    if (!entries.some((x) => x.isIntersecting)) return;
+    if (S.rendered < S.view.length) {
+      appendChunk();
+      armSentinel();
+    } else if (S.more && !S.loadingMore && rname() === 'cat') {
+      loadMore();
+    }
+  }, { root: $('#content'), rootMargin: '400px' });
+  observer.observe(sentinel);
+}
+
+async function loadMore() {
+  S.loadingMore = true;
+  const seq = S.seq;
+  try {
+    const res = await Files.category({ type: S.route.type, limit: CAT_PAGE, offset: S.offset });
+    if (seq !== S.seq) return;
+    S.offset += CAT_PAGE;
+    S.entries = S.entries.concat(res.entries);
+    S.more = res.more;
+    computeView();
+    appendChunk();
+    armSentinel();
+  } catch (e) {
+    console.error(e);
+  } finally {
+    S.loadingMore = false;
+  }
+}
+
+function renderView() {
+  const root = $('#view');
+  const n = rname();
+  document.body.classList.toggle('gate', S.access === false);
+  if (S.access === false) {
+    root.innerHTML = gateHtml();
+    return;
+  }
+  if (n === 'home') {
+    root.innerHTML = homeHtml();
+    return;
+  }
+  if (n === 'settings') {
+    root.innerHTML = settingsHtml();
+    return;
+  }
+  if (n === 'clean') {
+    root.innerHTML = cleanHtml();
+    return;
+  }
+  if (observer) observer.disconnect();
+  computeView();
+  pruneSelection();
+  if (S.loading && !S.view.length) {
+    root.innerHTML = `<div class="empty"><div class="spinner"></div><p>${n === 'dups' ? 'Buscando archivos repetidos…' : 'Cargando…'}</p></div>`;
+    return;
+  }
+  if (S.error || !S.view.length) {
+    root.innerHTML = emptyHtml();
+    return;
+  }
+  S.rendered = 0;
+  if (n === 'dups') {
+    root.innerHTML = `<ul class="list" id="list">${groupsHtml()}</ul>`;
+    S.rendered = S.view.length;
+    return;
+  }
+  root.innerHTML = `<ul class="list ${isGrid() ? 'grid' : ''}" id="list"></ul>`;
+  appendChunk();
+  armSentinel();
+}
+
+// --- portada
+function homeHtml() {
+  const vols = S.volumes
+    .map((v) => {
+      const used = v.total - v.free;
+      return `<button type="button" class="vol-card" data-vol="${esc(v.path)}"><span class="vol-ic">${icon(v.primary ? 'phone' : 'sd')}</span>
+        <span class="vol-meta"><span class="vol-name">${esc(v.label)}</span><span class="vol-sub">${formatSize(used)} usados de ${formatSize(v.total)} · ${formatSize(v.free)} libres</span>
+        <span class="vol-bar"><i style="width:${percent(used, v.total)}%"></i></span></span>${icon('chevron')}</button>`;
+    })
+    .join('');
+  const cats = CATS.map(
+    (c) => `<button type="button" class="cat" data-cat="${c.id}"><span class="cat-ic ${c.cls}">${icon(c.icon)}</span><span class="cat-name">${c.label}</span><span class="cat-n">${S.counts ? S.counts[c.id] : ''}</span></button>`
+  ).join('');
+  const have = new Set(S.quickExisting);
+  const chips = QUICK.map((q) => ({ path: joinPath(primaryRoot(), q[0]), label: q[1], ic: q[2] }))
+    .concat(S.favs.map((p) => ({ path: p, label: baseName(p), ic: 'star' })))
+    .filter((c) => have.has(c.path))
+    .map((c) => `<button type="button" class="chip" data-quick="${esc(c.path)}">${icon(c.ic)}<span>${esc(c.label)}</span></button>`)
+    .join('');
+  const recent = S.homeRecent
+    .map(
+      (e) => `<li class="item" data-recent="${esc(e.path)}">${thumbHtml(e)}<div class="meta"><div class="name">${esc(e.name)}</div><div class="sub">${esc(formatSize(e.size))} · ${esc(formatDate(e.mtime))}</div></div></li>`
+    )
+    .join('');
+  const ti = S.trashInfo;
+  return `<div class="home">
+    <section class="vols">${vols}</section>
+    <h2 class="section-title">Categorías</h2><section class="cat-grid">${cats}</section>
+    ${chips ? `<h2 class="section-title">Carpetas</h2><section class="chips">${chips}</section>` : ''}
+    ${recent ? `<div class="section-head"><h2 class="section-title">Recientes</h2><button type="button" class="btn text" data-a="seerecent">Ver todo</button></div><ul class="list">${recent}</ul>` : ''}
+    <h2 class="section-title">Herramientas</h2>
+    <section class="tools">
+      <button type="button" class="tool" data-tool="trash"><span class="tool-ic">${icon('trash')}</span><span class="tool-meta"><b>Papelera</b><small>${ti ? (ti.count ? `${countText(ti.count, 'elemento', 'elementos')} · ${formatSize(ti.size)}` : 'Vacía') : ''}</small></span>${icon('chevron')}</button>
+      <button type="button" class="tool" data-tool="clean"><span class="tool-ic">${icon('clean')}</span><span class="tool-meta"><b>Limpieza</b><small>Archivos grandes y duplicados</small></span>${icon('chevron')}</button>
+      <button type="button" class="tool" data-tool="settings"><span class="tool-ic">${icon('settings')}</span><span class="tool-meta"><b>Ajustes</b><small>Vista, ocultos, papelera, permisos</small></span>${icon('chevron')}</button>
+    </section></div>`;
+}
+
+function cleanHtml() {
+  return `<div class="home"><section class="tools">
+    <button type="button" class="tool" data-tool="large"><span class="tool-ic">${icon('big')}</span><span class="tool-meta"><b>Archivos grandes</b><small>Los de 50 MB o más, de mayor a menor</small></span>${icon('chevron')}</button>
+    <button type="button" class="tool" data-tool="dups"><span class="tool-ic">${icon('dup')}</span><span class="tool-meta"><b>Duplicados</b><small>Archivos idénticos repetidos (compara el contenido)</small></span>${icon('chevron')}</button>
+    <button type="button" class="tool" data-tool="trash"><span class="tool-ic">${icon('trash')}</span><span class="tool-meta"><b>Papelera</b><small>Revisa o vacía lo eliminado</small></span>${icon('chevron')}</button>
+  </section></div>`;
+}
+
+function gateHtml() {
+  const legacy = S.sdk && S.sdk < 30;
+  return `<div class="gate-card"><div class="badge">${icon('lock')}</div><h2>Necesito acceso a tus archivos</h2>
+    <p>Para ser un administrador de archivos de verdad (ver carpetas, copiar, mover y borrar) Android pide un permiso especial.</p>
+    <ol><li>Toca <b>Dar permiso</b>.</li><li>${legacy ? 'Acepta el aviso de Android.' : 'Activa <b>Permitir acceso para gestionar todos los archivos</b> para “Archivos”.'}</li><li>Vuelve a esta app: se abre sola.</li></ol>
+    <button type="button" class="btn primary" data-a="grant">Dar permiso</button>
+    <button type="button" class="btn text" data-a="appsettings">Abrir ajustes de la app</button>
+    <p class="fine">Todo se queda en tu teléfono. La app no usa internet.</p></div>`;
+}
+
+// --- ajustes
+const sw = (key, on, label, sub) => `<button type="button" class="set-row" data-set="${key}" role="switch" aria-checked="${on}"><span class="set-meta"><b>${label}</b>${sub ? `<small>${sub}</small>` : ''}</span><span class="switch"><i></i></span></button>`;
+const seg = (key, cur, opts) => `<div class="seg" role="radiogroup">${opts.map(([v, l]) => `<button type="button" role="radio" class="seg-btn" data-set="${key}" data-val="${v}" aria-checked="${String(cur) === String(v)}">${l}</button>`).join('')}</div>`;
+
+function settingsHtml() {
+  const s = S.settings;
+  return `<div class="settings">
+    <h2 class="section-title">Vista</h2>
+    <section class="card">
+      <div class="set-row static"><span class="set-meta"><b>Vista de carpetas</b></span>${seg('view', s.view, [['list', 'Lista'], ['grid', 'Cuadrícula']])}</div>
+      ${sw('showHidden', s.showHidden, 'Mostrar archivos ocultos', 'Los que empiezan con punto')}
+      ${sw('foldersFirst', s.foldersFirst, 'Carpetas primero', 'Antes que los archivos al ordenar')}
+    </section>
+    <h2 class="section-title">Papelera</h2>
+    <section class="card">
+      ${sw('useTrash', s.useTrash, 'Usar la papelera', s.useTrash ? 'Eliminar mueve a la papelera y se puede deshacer' : 'Eliminar borra para siempre (pide confirmación)')}
+      <div class="set-row static"><span class="set-meta"><b>Conservar</b><small>Tiempo antes de borrarse sola</small></span>${seg('trashDays', s.trashDays, [[7, '7 días'], [30, '30 días'], [90, '90 días'], [0, 'Siempre']])}</div>
+    </section>
+    <h2 class="section-title">Permisos</h2>
+    <section class="card">
+      <div class="set-row static"><span class="set-meta"><b>Acceso a todos los archivos</b><small>${S.access ? 'Activado' : 'Desactivado'}</small></span><button type="button" class="btn tonal" data-a="${S.access ? 'appsettings' : 'grant'}">${S.access ? 'Ajustes' : 'Activar'}</button></div>
+    </section>
+    <h2 class="section-title">Acerca de</h2>
+    <section class="card"><div class="set-row static"><span class="set-meta"><b>Archivos</b><small>${S.version ? `Versión ${esc(S.version)} · ` : ''}Todo es local: sin servidor ni cuentas.</small></span></div></section></div>`;
+}
+
+// --- barras inferiores
+const BAR_ITEMS = {
+  copy: ['Copiar', 'copy'], cut: ['Cortar', 'cut'], share: ['Compartir', 'share'], trash: ['Eliminar', 'trash'], more: ['Más', 'more'],
+  restore: ['Restaurar', 'restore'], delete: ['Eliminar', 'trash'],
+};
+
+function renderBars() {
+  const n = rname();
+  const bar = $('#selbar');
+  bar.classList.toggle('hidden', !S.selecting);
+  if (S.selecting) {
+    const keys = n === 'trash' ? ['restore', 'delete'] : ['copy', 'cut', 'share', 'trash', 'more'];
+    bar.innerHTML = keys.map((k) => `<button type="button" class="act ${k === 'delete' || (k === 'trash' && !S.settings.useTrash) ? 'danger' : ''}" data-act="${k}">${icon(BAR_ITEMS[k][1])}<span>${BAR_ITEMS[k][0]}</span></button>`).join('');
+  }
+  const clipOn = !!S.clip && n === 'folder' && !S.selecting;
+  const cb = $('#clipbar');
+  cb.classList.toggle('hidden', !clipOn);
+  if (clipOn) {
+    const label = `${S.clip.mode === 'copy' ? 'Copiando' : 'Moviendo'} ${countText(S.clip.count, 'elemento', 'elementos')}`;
+    cb.innerHTML = `<span class="clip-ic">${icon(S.clip.mode === 'copy' ? 'copy' : 'cut')}</span><span class="clip-text">${esc(label)}</span><button type="button" class="btn primary" data-clip="paste">${icon('paste')}Pegar aquí</button><button type="button" class="icon-btn" data-clip="cancel" aria-label="Cancelar">${icon('x')}</button>`;
+  }
+  const fabOn = n === 'folder' && !S.selecting && !clipOn && !S.error;
+  $('#fab').classList.toggle('hidden', !fabOn);
+  document.body.classList.toggle('fab-on', fabOn);
+  document.body.classList.toggle('bar-on', clipOn || S.selecting);
+}
+
+// ---------------------------------------------------------------- selección
+function enterSelection(path) {
+  if (!LIST_ROUTES.has(rname())) return;
+  S.selecting = true;
+  S.selected = new Set([path]);
+  hideSnack();
+  syncSelection();
+}
+function exitSelection() {
+  if (!S.selecting) return;
+  S.selecting = false;
+  S.selected.clear();
+  syncSelection();
+  renderCrumbs();
+  renderBanner();
+}
+function toggleSelect(path) {
+  if (S.selected.has(path)) S.selected.delete(path);
+  else S.selected.add(path);
+  if (S.selected.size === 0) S.selecting = false;
+  syncSelection();
+  if (!S.selecting) {
+    renderCrumbs();
+    renderBanner();
+  }
+}
+function selectAll() {
+  const all = S.view.map((e) => e.path);
+  const allOn = all.length > 0 && all.every((p) => S.selected.has(p));
+  S.selected = allOn ? new Set() : new Set(all);
+  if (!S.selected.size) S.selecting = false;
+  // dibuja todo lo que falte para que se vea marcado
+  while (S.rendered < S.view.length) appendChunk();
+  syncSelection();
+}
+function syncSelection() {
+  document.querySelectorAll('#view .item[data-path]').forEach((li) => li.classList.toggle('selected', S.selected.has(li.dataset.path)));
+  renderTopbar();
+  renderBars();
+  $('#banner').classList.toggle('hidden', S.selecting || !$('#banner').innerHTML);
+  $('#crumbs').classList.toggle('hidden', S.selecting || rname() !== 'folder');
+  document.body.classList.toggle('selecting', S.selecting);
+}
+const selectedEntries = () => [...S.selected].map((p) => S.byPath.get(p)).filter(Boolean);
+
+// ---------------------------------------------------------------- abrir
+async function openExternal(e, chooser = false) {
+  try {
+    const r = await Files.open({ path: e.path, chooser });
+    if (r && r.needsInstallPermission) {
+      await infoDialog({ title: 'Permite instalar apps', message: 'Android pidió activar “Permitir de esta fuente” para Archivos. Actívalo, vuelve y toca el APK otra vez.' });
+    }
+  } catch (err) {
+    await infoDialog({ title: 'No se pudo abrir', message: (err && err.message) || 'No hay ninguna app para abrir este archivo.' });
+  }
+}
+
+async function editText(e) {
+  const res = await Files.readText({ path: e.path, max: 1024 * 1024 });
+  if (res.tooLarge || res.binary) {
+    toast(res.tooLarge ? 'Es muy grande para editarlo aquí: se abre con otra app.' : 'No es un archivo de texto: se abre con otra app.');
+    return openExternal(e, true);
+  }
+  return openEditor(e, res.text, {
+    save: async (text) => {
+      await Files.writeText({ path: e.path, text });
+      toast('Guardado');
+      reloadCurrent().catch(() => {});
+    },
+    onError: (err) => infoDialog({ title: 'No se pudo guardar', message: (err && err.message) || 'Inténtalo de nuevo.' }),
+  });
+}
+
+function openEntry(e, list) {
+  if (!e) return undefined;
+  const k = kind(e);
+  if (e.dir) return openFolder(e.path);
+  if (k === 'image' || k === 'video' || k === 'audio') {
+    const group = (list || [e]).filter((x) => kind(x) === k);
+    return openViewer(group, Math.max(0, group.findIndex((x) => x.path === e.path)));
+  }
+  if (isEditable(e)) return guarded(() => editText(e));
+  return openExternal(e);
+}
+
+// ---------------------------------------------------------------- acciones sobre archivos
+const verbo = (mode, n) => (mode === 'copy' ? plural(n, 'copiado', 'copiados') : plural(n, 'movido', 'movidos'));
+
+async function namesIn(dir) {
+  const res = await Files.list({ path: dir, showHidden: true });
+  return new Set(res.entries.map((x) => x.name.toLowerCase()));
+}
+
+function setClip(mode, entries) {
+  S.clip = { mode, items: entries.map((e) => e.path), count: entries.length };
+  exitSelection();
+  renderBars();
+  toast(`${countText(entries.length, 'elemento listo', 'elementos listos')} para ${mode === 'copy' ? 'copiar' : 'mover'}. Abre la carpeta de destino y toca “Pegar aquí”.`);
+}
+
+async function doPaste() {
+  const clip = S.clip;
+  if (!clip || rname() !== 'folder') return;
+  const dest = S.route.path;
+  if (clip.mode === 'cut' && clip.items.every((p) => parentPath(p) === dest)) {
+    S.clip = null;
+    renderBars();
+    toast('Ya están en esta carpeta.');
+    return;
+  }
+  let policy = 'rename';
+  const { names } = await Files.conflicts({ items: clip.items, dest });
+  if (names.length) {
+    const choice = await choiceDialog({
+      title: names.length === 1 ? 'Ya existe un elemento con ese nombre' : `Ya existen ${names.length} elementos con el mismo nombre`,
+      message: names.length === 1 ? `“${names[0]}”` : names.slice(0, 3).join(', ') + (names.length > 3 ? '…' : ''),
+      choices: [{ id: 'rename', label: 'Conservar ambos', primary: true }, { id: 'replace', label: 'Reemplazar', danger: true }, { id: 'skip', label: 'Omitir los repetidos' }],
+    });
+    if (!choice) return;
+    policy = choice;
+  }
+  const fn = clip.mode === 'copy' ? Files.copy : Files.move;
+  const res = await runOp(clip.mode === 'copy' ? 'Copiando' : 'Moviendo', (opId) => fn.call(Files, { items: clip.items, dest, policy, opId }), { bytes: true });
+  if (clip.mode === 'cut' && !res.failed.length) S.clip = null;
+  else if (clip.mode === 'cut') S.clip.items = S.clip.items.filter((p) => res.failed.some((f) => f.name === baseName(p)));
+  await reloadCurrent();
+  const parts = [];
+  if (res.ok) parts.push(`${countText(res.ok, 'elemento', 'elementos')} ${verbo(clip.mode, res.ok)}`);
+  if (res.skipped) parts.push(`${res.skipped} omitido${res.skipped === 1 ? '' : 's'}`);
+  if (parts.length) toast(parts.join(' · '));
+  await reportFailures('No se pudieron pasar algunos elementos', res.failed);
+}
+
+async function doTrash(entries) {
+  const paths = entries.map((e) => e.path);
+  const res = await runOp('Moviendo a la papelera', (opId) => Files.trash({ items: paths, opId }));
+  const open = viewerEntry();
+  if (open && paths.includes(open.path)) closeViewer();
+  exitSelection();
+  await reloadCurrent();
+  if (res.ok) {
+    const msg = res.ok === 1 ? `“${trunc(entries[0].name)}” movido a la papelera` : `${res.ok} elementos movidos a la papelera`;
+    snack(msg, { action: 'Deshacer', onAction: () => guarded(() => undoTrash(res.trashed)) });
+  }
+  await reportFailures('No se pudieron eliminar algunos elementos', res.failed);
+}
+
+async function undoTrash(trashed) {
+  await Files.trashRestore({ paths: trashed });
+  await reloadCurrent();
+  toast('Restaurado');
+}
+
+async function doDeleteForever(entries, { trashItems = false } = {}) {
+  const total = entries.reduce((s, e) => s + (e.size || 0), 0);
+  const ok = await confirmDialog({
+    title: '¿Eliminar para siempre?',
+    message: entries.length === 1
+      ? `“${entries[0].name}”${total ? ` (${formatSize(total)})` : ''} se eliminará definitivamente. No se puede deshacer.`
+      : `${entries.length} elementos${total ? ` (${formatSize(total)})` : ''} se eliminarán definitivamente. No se puede deshacer.`,
+    confirmText: 'Eliminar',
+    danger: true,
+  });
+  if (!ok) return;
+  const paths = entries.map((e) => e.path);
+  const res = trashItems
+    ? await runOp('Eliminando', (opId) => Files.trashDelete({ paths, opId }))
+    : await runOp('Eliminando', (opId) => Files.delete({ items: paths, opId }));
+  const open = viewerEntry();
+  if (open && paths.includes(open.path)) closeViewer();
+  exitSelection();
+  await reloadCurrent();
+  toast(res.ok === 1 ? 'Eliminado' : `${res.ok} elementos eliminados`);
+  await reportFailures('No se pudieron eliminar algunos elementos', res.failed);
+}
+
+/** "Eliminar": papelera si está activada; si no, borrado definitivo con confirmación. */
+function doRemove(entries) {
+  return S.settings.useTrash ? doTrash(entries) : doDeleteForever(entries);
+}
+
+async function doRestore(entries) {
+  const res = await runOp('Restaurando', (opId) => Files.trashRestore({ paths: entries.map((e) => e.path), opId }));
+  exitSelection();
+  await reloadCurrent();
+  if (res.ok) toast(res.ok === 1 ? 'Restaurado en su carpeta original' : `${res.ok} elementos restaurados`);
+  await reportFailures('No se pudieron restaurar algunos elementos', res.failed);
+}
+
+async function doEmptyTrash() {
+  if (!S.entries.length) return;
+  const ok = await confirmDialog({
+    title: '¿Vaciar la papelera?',
+    message: `Se eliminarán para siempre ${countText(S.entries.length, 'elemento', 'elementos')} (${formatSize(S.entries.reduce((s, e) => s + e.size, 0))}). No se puede deshacer.`,
+    confirmText: 'Vaciar',
+    danger: true,
+  });
+  if (!ok) return;
+  await Files.trashEmpty();
+  await reloadCurrent();
+  toast('Papelera vacía');
+}
+
+async function doRename(e) {
+  const siblings = await namesIn(parentPath(e.path));
+  siblings.delete(e.name.toLowerCase()); // permite cambiar solo mayúsculas
+  const val = await promptDialog({
+    title: e.dir ? 'Renombrar carpeta' : 'Renombrar',
+    value: e.name,
+    select: e.dir ? 'all' : 'base',
+    validate: (v) => validateName(v, siblings),
+  });
+  if (val == null || val === e.name) return;
+  const res = await Files.rename({ path: e.path, name: val });
+  exitSelection();
+  if (viewerEntry() && viewerEntry().path === e.path) viewerReplace({ ...e, name: val, path: res.path });
+  await reloadCurrent();
+  toast('Renombrado');
+}
+
+async function doNew(isFolder) {
+  if (rname() !== 'folder') return;
+  const dir = S.route.path;
+  const taken = await namesIn(dir);
+  const val = await promptDialog({
+    title: isFolder ? 'Nueva carpeta' : 'Nuevo archivo de texto',
+    value: isFolder ? '' : 'Nuevo.txt',
+    select: isFolder ? 'all' : 'base',
+    confirmText: 'Crear',
+    validate: (v) => validateName(v, taken),
+  });
+  if (val == null) return;
+  if (isFolder) await Files.createFolder({ parent: dir, name: val });
+  else await Files.createFile({ parent: dir, name: val, text: '' });
+  await reloadCurrent();
+  toast(isFolder ? 'Carpeta creada' : 'Archivo creado');
+}
+
+async function doZip(entries) {
+  const dir = parentPath(entries[0].path);
+  const taken = await namesIn(dir);
+  const stem = entries.length === 1 ? (entries[0].dir ? entries[0].name : entries[0].name.replace(/\.[^.]*$/, '') || entries[0].name) : 'Archivos';
+  const name = await promptDialog({
+    title: 'Comprimir en ZIP',
+    value: uniqueName(`${stem}.zip`, taken),
+    select: 'base',
+    confirmText: 'Comprimir',
+    validate: (v) => validateName(v, taken) || (/\.zip$/i.test(v.trim()) ? '' : 'Debe terminar en .zip'),
+  });
+  if (name == null) return;
+  const dest = joinPath(dir, name);
+  const res = await runOp('Comprimiendo', (opId) => Files.zip({ items: entries.map((e) => e.path), dest, opId }), { bytes: true });
+  exitSelection();
+  await reloadCurrent();
+  toast(`Creado ${name} (${formatSize(res.size)})`);
+}
+
+async function doUnzip(e) {
+  const dir = parentPath(e.path);
+  const taken = await namesIn(dir);
+  const folder = uniqueName(e.name.replace(/\.zip$/i, '') || 'Extraído', taken, true);
+  const dest = joinPath(dir, folder);
+  const res = await runOp('Extrayendo', (opId) => Files.unzip({ path: e.path, dest, opId }), { bytes: true });
+  exitSelection();
+  await reloadCurrent();
+  snack(`Extraído en “${trunc(folder)}” (${countText(res.files, 'archivo', 'archivos')})`, { action: 'Abrir', onAction: () => openFolder(dest) });
+}
+
+async function doShare(entries) {
+  const files = entries.filter((e) => !e.dir);
+  if (!files.length) {
+    toast('Las carpetas no se pueden compartir: comprímelas en ZIP primero.');
+    return;
+  }
+  if (files.length < entries.length) toast('Las carpetas se omiten: solo se comparten archivos.');
+  await Files.share({ paths: files.map((e) => e.path) });
+  exitSelection();
+}
+
+function toggleFav(path) {
+  const i = S.favs.indexOf(path);
+  if (i >= 0) S.favs.splice(i, 1);
+  else S.favs.push(path);
+  persist('archivos.favs', S.favs);
+  toast(i >= 0 ? 'Quitada de favoritos' : 'Añadida a favoritos (en la portada)');
+  exitSelection();
+}
+
+async function doDetails(entries) {
+  if (entries.length === 1) {
+    const e = entries[0];
+    if (e.trash) {
+      await infoDialog({
+        title: 'Detalles',
+        lines: [`Nombre: ${e.name}`, `Estaba en: ${displayPath(parentPath(e.orig || ''), S.volumes)}`, `Eliminado: ${formatDateTime(e.deletedAt)}`, `Tamaño: ${formatSize(e.size)}`, trashLabel(e.deletedAt, trashDays())],
+      });
+      return;
+    }
+    const st = await Files.stat({ path: e.path });
+    const perms = [st.canRead ? 'lectura' : '', st.canWrite ? 'escritura' : ''].filter(Boolean).join(' y ') || 'ninguno';
+    const rows = [
+      ['Nombre', st.name], ['Tipo', KIND_LABEL[kind(st)]], ['Ubicación', displayPath(st.parent, S.volumes)],
+      ['Modificado', formatDateTime(st.mtime)], ['Permisos', perms],
+      st.dir ? ['Tamaño', 'Calculando…'] : ['Tamaño', `${formatSize(st.size)} (${st.size.toLocaleString('es-CO')} bytes)`],
+    ];
+    const dlg = detailsDialog({ title: st.dir ? 'Detalles de la carpeta' : 'Detalles', rows });
+    if (st.dir) {
+      const opId = newOpId();
+      Files.dirSize({ path: st.path, opId })
+        .then((r) => dlg.update([...rows.slice(0, 5), ['Tamaño', formatSize(r.size)], ['Contenido', `${countText(r.files, 'archivo', 'archivos')}, ${countText(r.folders, 'carpeta', 'carpetas')}`]]))
+        .catch(() => {});
+      dlg.done.then(() => Files.cancel({ opId }).catch(() => {}));
+    }
+    await dlg.done;
+    return;
+  }
+  const dirs = entries.filter((e) => e.dir).length;
+  const rows = [['Elementos', `${countText(entries.length - dirs, 'archivo', 'archivos')}${dirs ? ` y ${countText(dirs, 'carpeta', 'carpetas')}` : ''}`], ['Tamaño total', 'Calculando…']];
+  const dlg = detailsDialog({ title: 'Detalles', rows });
+  const opIds = [];
+  (async () => {
+    let total = 0;
+    for (const e of entries) {
+      if (!e.dir) {
+        total += e.size;
+        continue;
+      }
+      const opId = newOpId();
+      opIds.push(opId);
+      total += (await Files.dirSize({ path: e.path, opId })).size;
+    }
+    dlg.update([rows[0], ['Tamaño total', formatSize(total)]]);
+  })().catch(() => {});
+  dlg.done.then(() => opIds.forEach((id) => Files.cancel({ opId: id }).catch(() => {})));
+  await dlg.done;
+}
+
+const trunc = (s, n = 28) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+// ---------------------------------------------------------------- menús
+function menuItemsFor(entries, { full }) {
+  const one = entries.length === 1 ? entries[0] : null;
+  const items = [];
+  if (full) {
+    items.push({ id: 'open', label: 'Abrir', icon: 'folderopen' });
+    if (one && !one.dir) items.push({ id: 'openWith', label: 'Abrir con…', icon: 'open' }, { id: 'share', label: 'Compartir', icon: 'share' });
+    items.push({ id: 'copy', label: 'Copiar', icon: 'copy' }, { id: 'cut', label: 'Cortar', icon: 'cut' });
+  } else if (one && !one.dir) {
+    items.push({ id: 'openWith', label: 'Abrir con…', icon: 'open' });
+  }
+  if (one) items.push({ id: 'rename', label: 'Renombrar', icon: 'edit' });
+  items.push({ id: 'zip', label: 'Comprimir en ZIP', icon: 'zip' });
+  if (one && isZip(one)) items.push({ id: 'unzip', label: 'Extraer aquí', icon: 'unzip' });
+  if (one && one.dir) items.push({ id: 'fav', label: S.favs.includes(one.path) ? 'Quitar de favoritos' : 'Añadir a favoritos', icon: 'star' });
+  if (one && rname() !== 'folder') items.push({ id: 'location', label: 'Abrir ubicación', icon: 'folder' });
+  items.push({ id: 'details', label: 'Detalles', icon: 'info' }, { divider: true });
+  if (full) items.push({ id: 'trash', label: S.settings.useTrash ? 'Mover a la papelera' : 'Eliminar', icon: 'trash', danger: !S.settings.useTrash });
+  if (S.settings.useTrash || !full) items.push({ id: 'delete', label: 'Eliminar para siempre', icon: 'trash', danger: true });
+  return items;
+}
+
+function runAction(id, entries) {
+  if (!entries.length) return;
+  const one = entries[0];
+  guarded(async () => {
+    switch (id) {
+      case 'open': return openEntry(one, S.view);
+      case 'openWith': return openExternal(one, true);
+      case 'share': return doShare(entries);
+      case 'copy': return setClip('copy', entries);
+      case 'cut': return setClip('cut', entries);
+      case 'rename': return doRename(one);
+      case 'zip': return doZip(entries);
+      case 'unzip': return doUnzip(one);
+      case 'fav': return toggleFav(one.path);
+      case 'location': return openFolder(parentPath(one.path));
+      case 'details': return doDetails(entries);
+      case 'trash': return doRemove(entries);
+      case 'delete': return doDeleteForever(entries);
+      case 'restore': return doRestore(entries);
+      case 'purge': return doDeleteForever(entries, { trashItems: true });
+      default: return undefined;
+    }
+  });
+}
+
+async function openItemMenu(e) {
+  const choice = await sheet({
+    title: e.name,
+    subtitle: `${e.dir ? countText(e.count || 0, 'elemento', 'elementos') : formatSize(e.size)} · ${KIND_LABEL[kind(e)]}`,
+    items: menuItemsFor([e], { full: true }),
+  });
+  if (choice) runAction(choice, [e]);
+}
+
+async function openTrashMenu(e) {
+  const choice = await sheet({
+    title: e.name,
+    subtitle: `${formatSize(e.size)} · ${trashLabel(e.deletedAt, trashDays())}`,
+    items: [{ id: 'restore', label: 'Restaurar', icon: 'restore' }, { id: 'details', label: 'Detalles', icon: 'info' }, { divider: true }, { id: 'purge', label: 'Eliminar para siempre', icon: 'trash', danger: true }],
+  });
+  if (choice) runAction(choice, [e]);
+}
+
+async function openMoreMenu() {
+  const entries = selectedEntries();
+  const choice = await sheet({ title: countText(entries.length, 'elemento seleccionado', 'elementos seleccionados'), items: menuItemsFor(entries, { full: false }) });
+  if (choice) runAction(choice, entries);
+}
+
+async function openFolderMenu() {
+  const s = S.settings;
+  const here = S.route.path;
+  const choice = await sheet({
+    title: titleOf(),
+    subtitle: displayPath(here, S.volumes),
+    items: [
+      { id: 'newfolder', label: 'Nueva carpeta', icon: 'folderplus' },
+      { id: 'newfile', label: 'Nuevo archivo de texto', icon: 'fileplus' },
+      { divider: true },
+      { id: 'sort', label: 'Ordenar por…', icon: 'sort', sub: `${{ name: 'Nombre', date: 'Fecha', size: 'Tamaño', type: 'Tipo' }[s.sortKey]} · ${s.sortDir === 'asc' ? 'ascendente' : 'descendente'}` },
+      { id: 'hidden', label: s.showHidden ? 'Ocultar archivos ocultos' : 'Mostrar archivos ocultos', icon: 'eye' },
+      { id: 'selall', label: 'Seleccionar todo', icon: 'checkall' },
+      { id: 'fav', label: S.favs.includes(here) ? 'Quitar de favoritos' : 'Añadir a favoritos', icon: 'star' },
+      { id: 'refresh', label: 'Actualizar', icon: 'refresh' },
+      { id: 'details', label: 'Detalles de la carpeta', icon: 'info' },
+    ],
+  });
+  if (!choice) return;
+  if (choice === 'newfolder') guarded(() => doNew(true));
+  else if (choice === 'newfile') guarded(() => doNew(false));
+  else if (choice === 'sort') openSortMenu();
+  else if (choice === 'hidden') setSetting('showHidden', !s.showHidden);
+  else if (choice === 'selall') {
+    if (S.view.length) {
+      S.selecting = true;
+      selectAll();
+    }
+  } else if (choice === 'fav') toggleFav(here);
+  else if (choice === 'refresh') guarded(() => reloadCurrent());
+  else if (choice === 'details') runAction('details', [{ name: baseName(here), path: here, dir: true }]);
+}
+
+async function openSortMenu() {
+  const s = S.settings;
+  const k = (id, label) => ({ id: `k:${id}`, label, checked: s.sortKey === id });
+  const choice = await sheet({
+    title: 'Ordenar por',
+    items: [k('name', 'Nombre'), k('date', 'Fecha de modificación'), k('size', 'Tamaño'), k('type', 'Tipo'), { divider: true },
+      { id: 'd:asc', label: 'Ascendente (A-Z, antiguos, pequeños)', checked: s.sortDir === 'asc' }, { id: 'd:desc', label: 'Descendente (Z-A, recientes, grandes)', checked: s.sortDir === 'desc' }],
+  });
+  if (!choice) return;
+  const [t, v] = choice.split(':');
+  setSetting(t === 'k' ? 'sortKey' : 'sortDir', v);
+}
+
+async function openTrashMore() {
+  const choice = await sheet({
+    title: 'Papelera',
+    items: [{ id: 'empty', label: 'Vaciar la papelera', icon: 'trash', danger: true }, { id: 'selall', label: 'Seleccionar todo', icon: 'checkall' }, { id: 'refresh', label: 'Actualizar', icon: 'refresh' }],
+  });
+  if (choice === 'empty') guarded(doEmptyTrash);
+  else if (choice === 'selall' && S.view.length) {
+    S.selecting = true;
+    selectAll();
+  } else if (choice === 'refresh') guarded(() => reloadCurrent());
+}
+
+// ---------------------------------------------------------------- ajustes
+function setSetting(key, value) {
+  S.settings[key] = value;
+  persist('archivos.settings', S.settings);
+  if (key === 'showHidden') {
+    if (rname() === 'folder' || rname() === 'search') reloadCurrent().catch(() => {});
+    else renderAll();
+  } else if (key === 'trashDays') {
+    purgeTrash().catch(() => {});
+    renderAll();
+  } else renderAll();
+}
+
+async function purgeTrash() {
+  if (S.access !== true || !(trashDays() > 0)) return;
+  const res = await Files.trashPurge({ days: trashDays() });
+  if (res.ok) {
+    toast(`Se ${plural(res.ok, 'eliminó 1 elemento', `eliminaron ${res.ok} elementos`)} de la papelera (más de ${trashDays()} días).`);
+    if (rname() === 'trash') reloadCurrent().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------- búsqueda
+function scheduleSearch() {
+  clearTimeout(S.searchTimer);
+  S.searchTimer = setTimeout(() => runSearch().catch((e) => console.error(e)), 350);
+}
+
+async function runSearch() {
+  const q = S.query.trim();
+  const seq = ++S.searchSeq;
+  S.searchOps.forEach((id) => Files.cancel({ opId: id }).catch(() => {}));
+  S.searchOps = [];
+  if (!q) {
+    S.entries = [];
+    S.searching = false;
+    S.truncated = false;
+    renderBanner();
+    renderView();
+    return;
+  }
+  S.searching = true;
+  renderBanner();
+  const roots = S.route.root ? [S.route.root] : S.volumes.map((v) => v.path);
+  try {
+    const results = await Promise.all(
+      roots.map(async (root) => {
+        const opId = newOpId();
+        S.searchOps.push(opId);
+        try {
+          return await Files.search({ root, query: q, showHidden: S.settings.showHidden, limit: 300, opId });
+        } catch (e) {
+          if (isCancel(e)) return null;
+          throw e;
+        }
+      })
+    );
+    if (seq !== S.searchSeq) return;
+    S.entries = results.filter(Boolean).flatMap((r) => r.entries);
+    S.truncated = results.some((r) => r && r.truncated);
+    S.error = null;
+  } catch (e) {
+    if (seq !== S.searchSeq) return;
+    S.entries = [];
+    S.error = (e && e.message) || 'No se pudo buscar.';
+  }
+  S.searching = false;
+  renderBanner();
+  renderView();
+}
+
+// ---------------------------------------------------------------- duplicados
+async function scanDuplicates(seq) {
+  try {
+    const res = await runOp('Buscando duplicados', (opId) => Files.duplicates({ minSize: 1024, opId }), { bytes: true });
+    if (seq === S.seq) S.groups = res.groups;
+  } catch (e) {
+    if (isCancel(e)) {
+      S.route.scanned = false;
+      return;
+    }
+    throw e;
+  }
+}
+
+function selectExtraCopies() {
+  const extras = S.groups.flatMap((g) => extraCopies(g.items));
+  if (!extras.length) return;
+  S.selecting = true;
+  S.selected = new Set(extras);
+  syncSelection();
+  toast(`${countText(extras.length, 'copia elegida', 'copias elegidas')}: se conserva la más antigua de cada grupo.`);
+}
+
+// ---------------------------------------------------------------- permiso
+let pollTimer = null;
+
+async function checkAccess() {
+  try {
+    const r = await Files.hasAccess();
+    S.sdk = r.sdk;
+    return !!r.granted;
+  } catch (e) {
+    console.error(e);
+    return false;
+  }
+}
+
+function startPoll() {
+  stopPoll();
+  pollTimer = setInterval(async () => {
+    if (S.access === false && (await checkAccess())) await startApp();
+  }, 1500);
+}
+function stopPoll() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+async function grantAccess() {
+  try {
+    await Files.requestAccess();
+  } catch (e) {
+    toast((e && e.message) || 'No se pudo abrir la pantalla de permisos.');
+  }
+}
+
+// ---------------------------------------------------------------- bóveda de la versión 1
+async function migrateVault() {
+  if (!isNative) return;
+  let recs;
+  try {
+    recs = await db.getAll();
+  } catch (e) {
+    return;
+  }
+  if (!recs.length) return;
+  try {
+    const FS = plugin('Filesystem');
+    const { uri } = await FS.getUri({ path: 'archivos', directory: 'DATA' });
+    const srcDir = decodeURIComponent(uri.replace(/^file:\/\//, '')).replace(/\/+$/, '');
+    const res = await Files.importLegacy({
+      srcDir,
+      destDir: joinPath(joinPath(primaryRoot(), 'Documents'), 'Archivos'),
+      items: recs.map((r) => ({ id: r.id, name: r.name, trashedAt: r.trashedAt == null ? null : r.trashedAt })),
+    });
+    if (res.okIds.length) await db.deleteMany(res.okIds);
+    const moved = recs.filter((r) => res.okIds.includes(r.id) && r.trashedAt == null).length;
+    const bin = recs.filter((r) => res.okIds.includes(r.id) && r.trashedAt != null).length;
+    if (moved || bin) {
+      setTimeout(() => toast(`Tus archivos de la versión anterior están en Documents/Archivos${bin ? ` (${bin} en la papelera)` : ''}.`), 800);
+    }
+    if (res.failed.length) await reportFailures('Algunos archivos de la versión anterior no se pudieron pasar', res.failed);
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 // ---------------------------------------------------------------- eventos
 function wire() {
-  const list = $('#list');
+  const view = $('#view');
   let press = null;
 
-  list.addEventListener('pointerdown', (e) => {
-    const li = e.target.closest('.item');
+  view.addEventListener('pointerdown', (e) => {
+    const li = e.target.closest('.item[data-path]');
     if (!li || e.target.closest('[data-more]') || e.button > 0) return;
-    const id = li.dataset.id;
-    press = { x: e.clientX, y: e.clientY, id, timer: setTimeout(() => {
-      press = null;
-      suppressClick = true;
-      if (navigator.vibrate) {
-        try { navigator.vibrate(12); } catch (err) { /* sin vibración */ }
-      }
-      if (state.selecting) toggleSelect(id);
-      else enterSelection(id);
-    }, 450) };
+    const path = li.dataset.path;
+    press = {
+      x: e.clientX, y: e.clientY,
+      timer: setTimeout(() => {
+        press = null;
+        suppressClick = true;
+        if (navigator.vibrate) {
+          try { navigator.vibrate(12); } catch (err) { /* sin vibración */ }
+        }
+        if (S.selecting) toggleSelect(path);
+        else enterSelection(path);
+      }, 450),
+    };
   });
   const cancelPress = () => {
     if (press) clearTimeout(press.timer);
     press = null;
   };
-  list.addEventListener('pointermove', (e) => {
+  view.addEventListener('pointermove', (e) => {
     if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) cancelPress();
   });
-  list.addEventListener('pointerup', cancelPress);
-  list.addEventListener('pointercancel', cancelPress);
-  list.addEventListener('contextmenu', (e) => e.preventDefault());
-  list.addEventListener('scroll', cancelPress, true);
+  view.addEventListener('pointerup', cancelPress);
+  view.addEventListener('pointercancel', cancelPress);
+  view.addEventListener('contextmenu', (e) => e.preventDefault());
+  $('#content').addEventListener('scroll', cancelPress, { passive: true });
 
-  list.addEventListener('click', (e) => {
+  view.addEventListener('error', (e) => {
+    if (e.target && e.target.tagName === 'IMG') e.target.remove(); // si la miniatura falla, queda el ícono
+  }, true);
+
+  view.addEventListener('click', (e) => {
     if (suppressClick) {
       suppressClick = false;
       return;
     }
-    const li = e.target.closest('.item');
-    if (!li) return;
-    const id = li.dataset.id;
-    if (e.target.closest('[data-more]')) return void openItemMenu(id);
-    if (state.selecting) toggleSelect(id);
-    else openPreview(id);
+    const t = e.target;
+    const li = t.closest('.item[data-path]');
+    if (li) {
+      const ent = S.byPath.get(li.dataset.path);
+      if (!ent) return;
+      if (t.closest('[data-more]')) return void (rname() === 'trash' ? openTrashMenu(ent) : openItemMenu(ent));
+      if (S.selecting) return toggleSelect(ent.path);
+      if (rname() === 'trash') return void openTrashMenu(ent);
+      return void openEntry(ent, S.view);
+    }
+    const rec = t.closest('[data-recent]');
+    if (rec) return void openEntry(S.homeRecent.find((x) => x.path === rec.dataset.recent), S.homeRecent);
+    const vol = t.closest('[data-vol]');
+    if (vol) return openFolder(vol.dataset.vol);
+    const cat = t.closest('[data-cat]');
+    if (cat) return void go({ name: 'cat', type: cat.dataset.cat });
+    const quick = t.closest('[data-quick]');
+    if (quick) return openFolder(quick.dataset.quick);
+    const tool = t.closest('[data-tool]');
+    if (tool) return void go({ name: tool.dataset.tool });
+    const set = t.closest('[data-set]');
+    if (set) {
+      const key = set.dataset.set;
+      if (set.dataset.val !== undefined) return setSetting(key, key === 'trashDays' ? Number(set.dataset.val) : set.dataset.val);
+      return setSetting(key, !S.settings[key]);
+    }
+    const a = t.closest('[data-a]');
+    if (a) return handleTopAction(a.dataset.a);
+    return undefined;
   });
-  // Si la miniatura falla, se queda el ícono del tipo.
-  list.addEventListener('error', (e) => {
-    if (e.target && e.target.tagName === 'IMG') e.target.remove();
-  }, true);
 
-  $('#empty').addEventListener('click', (e) => {
-    if (e.target.closest('[data-upload]')) $('#picker').click();
+  $('#topbar').addEventListener('click', (e) => {
+    const a = e.target.closest('[data-a]');
+    if (a) handleTopAction(a.dataset.a);
   });
-  document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => setTab(t.dataset.tab)));
-  document.querySelectorAll('.seg-btn').forEach((b) => b.addEventListener('click', () => setSort(b.dataset.sort)));
-  $('#btnSearch').addEventListener('click', () => (state.searchOpen ? closeSearch() : openSearch()));
-  $('#btnSearchClear').addEventListener('click', () => {
-    if (state.query) {
-      state.query = '';
-      $('#searchInput').value = '';
-      render();
-      $('#searchInput').focus();
-    } else {
-      closeSearch();
+  $('#topbar').addEventListener('input', (e) => {
+    if (e.target.id === 'searchInput') {
+      S.query = e.target.value;
+      scheduleSearch();
     }
   });
-  $('#searchInput').addEventListener('input', (e) => {
-    state.query = e.target.value;
-    render();
+  $('#crumbs').addEventListener('click', (e) => {
+    const c = e.target.closest('[data-crumb]');
+    if (c && c.dataset.crumb !== S.route.path) openFolder(c.dataset.crumb);
   });
-  $('#btnSelClose').addEventListener('click', exitSelection);
-  $('#btnSelAll').addEventListener('click', selectAll);
-  $('#btnEmptyTrash').addEventListener('click', () => guarded(doEmptyTrash));
-  $('#fab').addEventListener('click', () => $('#picker').click());
-  $('#picker').addEventListener('change', (e) => {
-    const files = Array.from(e.target.files || []);
-    if (files.length) guarded(() => handleFiles(files));
+  $('#banner').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-b]');
+    if (!b) return;
+    if (b.dataset.b === 'empty') guarded(doEmptyTrash);
+    else if (b.dataset.b === 'extras') selectExtraCopies();
+  });
+  $('#clipbar').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-clip]');
+    if (!b) return;
+    if (b.dataset.clip === 'paste') guarded(doPaste);
+    else {
+      S.clip = null;
+      renderBars();
+    }
   });
   $('#selbar').addEventListener('click', (e) => {
     const b = e.target.closest('[data-act]');
-    if (b) runAction(b.dataset.act, Array.from(state.selected));
+    if (!b) return;
+    const act = b.dataset.act;
+    const entries = selectedEntries();
+    if (act === 'more') return void openMoreMenu();
+    if (act === 'delete') return runAction('purge', entries);
+    return runAction(act, entries);
+  });
+  $('#fab').addEventListener('click', async () => {
+    const choice = await sheet({ title: 'Crear', items: [{ id: 'f', label: 'Nueva carpeta', icon: 'folderplus' }, { id: 'n', label: 'Nuevo archivo de texto', icon: 'fileplus' }] });
+    if (choice) guarded(() => doNew(choice === 'f'));
   });
 
-  // vista previa
-  $('#pvBack').addEventListener('click', closePreview);
-  $('#pvPrev').addEventListener('click', () => stepPreview(-1));
-  $('#pvNext').addEventListener('click', () => stepPreview(1));
-  $('#pvActions').addEventListener('click', (e) => {
-    const b = e.target.closest('[data-act]');
-    if (b && pv.ids[pv.idx]) runAction(b.dataset.act, [pv.ids[pv.idx]]);
-  });
-
-  // botón Atrás
   const App = plugin('App');
   if (isNative && App) {
     App.addListener('backButton', onBack);
-    App.addListener('appStateChange', ({ isActive: active }) => {
-      if (active) purgeExpired().catch(() => {});
+    App.addListener('appStateChange', ({ isActive }) => {
+      if (!isActive) return;
+      if (S.access === false) {
+        checkAccess().then((ok) => ok && startApp());
+        return;
+      }
+      purgeTrash().catch(() => {});
+      if (!S.busy && !layers.open && !S.selecting && rname() !== 'search') reloadCurrent().catch(() => {});
     });
+    App.getInfo().then((i) => { S.version = i.version || ''; }).catch(() => {});
   } else {
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') onBack();
     });
   }
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) purgeExpired().catch(() => {});
-  });
   window.addEventListener('unhandledrejection', (e) => console.error(e.reason));
 }
 
-// ---------------------------------------------------------------- arranque
-async function boot() {
-  hydrateIcons();
-  state.sort = ['recent', 'name', 'size'].includes(prefGet('archivos.sort', 'recent')) ? prefGet('archivos.sort', 'recent') : 'recent';
-  wire();
-  try {
-    await storage.init();
-    (await db.getAll()).forEach((f) => store.set(f.id, f));
-    await reconcile();
-  } catch (e) {
-    console.error(e);
-    $('#empty').classList.remove('hidden');
-    $('#empty').innerHTML = `<div class="badge">${icon('x')}</div><h2>No se pudo abrir el almacenamiento</h2><p>Cierra la app y vuelve a abrirla. Si sigue igual, reinstálala.</p>`;
-    return;
+function handleTopAction(a) {
+  switch (a) {
+    case 'back': return void goBack();
+    case 'search': return void go({ name: 'search', root: rname() === 'folder' ? S.route.path : null });
+    case 'settings': return void go({ name: 'settings' });
+    case 'view': return setSetting('view', S.settings.view === 'grid' ? 'list' : 'grid');
+    case 'more': return void (rname() === 'trash' ? openTrashMore() : openFolderMenu());
+    case 'selclose': return exitSelection();
+    case 'selall': return selectAll();
+    case 'clearsearch': {
+      S.query = '';
+      const i = $('#searchInput');
+      if (i) {
+        i.value = '';
+        i.focus();
+      }
+      return void runSearch();
+    }
+    case 'retry': return void guarded(reloadCurrent);
+    case 'seerecent': return void go({ name: 'recent' });
+    case 'grant': return void grantAccess();
+    case 'appsettings': return void Files.openAppSettings().catch(() => {});
+    default: return undefined;
   }
-  render();
-  await purgeExpired().catch(() => {});
-  setInterval(() => purgeExpired().catch(() => {}), 60 * 1000); // también mientras la app está abierta
 }
 
+// ---------------------------------------------------------------- arranque
+async function startApp() {
+  stopPoll();
+  S.access = true;
+  document.body.classList.remove('gate');
+  try {
+    S.volumes = (await Files.getVolumes()).volumes;
+    await migrateVault();
+    await purgeTrash().catch(() => {});
+  } catch (e) {
+    console.error(e);
+  }
+  S.history = [];
+  S.route = { name: 'home' };
+  await go({ name: 'home' }, { push: false });
+}
+
+async function boot() {
+  hydrateIcons();
+  wire();
+  initViewer((act, e) => {
+    if (act === 'share') guarded(() => doShare([e]));
+    else if (act === 'openWith') openExternal(e, true);
+    else if (act === 'details') guarded(() => doDetails([e]));
+    else if (act === 'delete') guarded(() => doRemove([e]));
+  });
+  await initProgress();
+  S.access = await checkAccess();
+  if (!S.access) {
+    S.access = false;
+    renderAll();
+    startPoll();
+    return;
+  }
+  await startApp();
+  setInterval(() => purgeTrash().catch(() => {}), 10 * 60 * 1000);
+}
+
+window.__app = { S, go, onBack }; // para pruebas
 boot();

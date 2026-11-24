@@ -1,5 +1,5 @@
-// IndexedDB: metadatos de los archivos { id, name, size, type, at, trashedAt }.
-// El almacén "blobs" solo se usa en el modo web (pruebas en la PC); en el celular los bytes van al sistema de archivos.
+// IndexedDB de la versión 1 (la "bóveda": archivos subidos a la app). Solo se lee para pasarlos a carpetas reales.
+// Registros: { id, name, size, type, at, trashedAt }
 
 const NAME = 'archivos-db';
 const VERSION = 1;
@@ -36,21 +36,8 @@ function tx(stores, mode, fn) {
 
 export const getAll = () => tx('files', 'readonly', (t) => t.objectStore('files').getAll());
 
-export const put = (rec) => tx('files', 'readwrite', (t) => t.objectStore('files').put(rec));
-
-export const putMany = (recs) =>
-  tx('files', 'readwrite', (t) => {
-    const s = t.objectStore('files');
-    recs.forEach((r) => s.put(r));
-  });
-
 export const deleteMany = (ids) =>
   tx('files', 'readwrite', (t) => {
     const s = t.objectStore('files');
     ids.forEach((id) => s.delete(id));
   });
-
-export const putBlob = (id, blob) => tx('blobs', 'readwrite', (t) => t.objectStore('blobs').put(blob, id));
-export const getBlob = (id) => tx('blobs', 'readonly', (t) => t.objectStore('blobs').get(id));
-export const delBlob = (id) => tx('blobs', 'readwrite', (t) => t.objectStore('blobs').delete(id));
-export const blobKeys = () => tx('blobs', 'readonly', (t) => t.objectStore('blobs').getAllKeys());

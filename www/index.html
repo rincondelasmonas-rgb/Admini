@@ -11,54 +11,21 @@
 </head>
 <body>
   <div id="app" class="app">
-    <header class="topbar">
-      <div id="tbNormal" class="tb-row">
-        <div class="tb-title">
-          <h1>Archivos</h1>
-          <p id="storageText" class="tb-sub" aria-live="polite"></p>
-        </div>
-        <button id="btnSearch" type="button" class="icon-btn" aria-label="Buscar" data-icon="search"></button>
-      </div>
-      <div id="tbSelect" class="tb-row hidden">
-        <button id="btnSelClose" type="button" class="icon-btn" aria-label="Salir de la selección" data-icon="x"></button>
-        <div id="selCount" class="tb-title sel-count" aria-live="polite"></div>
-        <button id="btnSelAll" type="button" class="icon-btn" aria-label="Seleccionar todo" data-icon="checkall"></button>
-      </div>
-      <div id="searchRow" class="search-row hidden">
-        <span class="search-ic" data-icon="search"></span>
-        <input id="searchInput" class="search-input" type="search" inputmode="search" placeholder="Buscar por nombre" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Buscar por nombre">
-        <button id="btnSearchClear" type="button" class="icon-btn small" aria-label="Borrar búsqueda" data-icon="x"></button>
-      </div>
-    </header>
-
-    <nav class="tabs" role="tablist" aria-label="Secciones">
-      <button id="tabAll" type="button" role="tab" class="tab" data-tab="all" aria-selected="true">Todos <span id="cntAll" class="count">0</span></button>
-      <button id="tabTrash" type="button" role="tab" class="tab" data-tab="trash" aria-selected="false">Basurero <span id="cntTrash" class="count">0</span></button>
-    </nav>
-
-    <div class="toolbar">
-      <div class="seg" role="radiogroup" aria-label="Ordenar por">
-        <button type="button" role="radio" class="seg-btn" data-sort="recent" aria-checked="true">Recientes</button>
-        <button type="button" role="radio" class="seg-btn" data-sort="name" aria-checked="false">Nombre</button>
-        <button type="button" role="radio" class="seg-btn" data-sort="size" aria-checked="false">Tamaño</button>
-      </div>
-    </div>
-
-    <div id="trashBanner" class="trash-banner hidden">
-      <span>Los archivos se eliminan solos a los 30 días.</span>
-      <button id="btnEmptyTrash" type="button" class="btn text danger-text">Vaciar</button>
-    </div>
+    <header id="topbar" class="topbar"></header>
+    <div id="crumbs" class="crumbs hidden" aria-label="Ruta"></div>
+    <div id="banner" class="banner hidden" aria-live="polite"></div>
 
     <main id="content" class="content">
-      <ul id="list" class="list" aria-live="polite"></ul>
-      <div id="empty" class="empty hidden"></div>
+      <div id="view" class="view"></div>
+      <div id="sentinel" class="sentinel" aria-hidden="true"></div>
     </main>
 
-    <button id="fab" type="button" class="fab"><span data-icon="plus"></span><span>Subir</span></button>
+    <div id="clipbar" class="clipbar hidden"></div>
     <nav id="selbar" class="selbar hidden" aria-label="Acciones de selección"></nav>
+    <button id="fab" type="button" class="fab hidden" aria-label="Crear"><span data-icon="plus"></span><span>Nuevo</span></button>
   </div>
 
-  <section id="preview" class="preview hidden" aria-label="Vista previa">
+  <section id="viewer" class="preview hidden" aria-label="Vista previa">
     <header class="pv-top">
       <button id="pvBack" type="button" class="icon-btn" aria-label="Cerrar vista previa" data-icon="back"></button>
       <div class="pv-title">
@@ -72,9 +39,17 @@
     <nav id="pvActions" class="pv-actions" aria-label="Acciones"></nav>
   </section>
 
+  <section id="editor" class="editor hidden" aria-label="Editor de texto">
+    <header class="ed-top">
+      <button id="edBack" type="button" class="icon-btn" aria-label="Cerrar editor" data-icon="back"></button>
+      <div id="edName" class="ed-name"></div>
+      <button id="edSave" type="button" class="btn primary ed-save" disabled>Guardar</button>
+    </header>
+    <textarea id="edText" class="ed-text" spellcheck="false" autocapitalize="none" autocomplete="off" aria-label="Contenido del archivo"></textarea>
+  </section>
+
   <div id="overlay-root"></div>
   <div id="snack" class="snack hidden" role="status" aria-live="polite"></div>
-  <input id="picker" type="file" multiple hidden>
 
   <script type="module" src="js/app.js"></script>
 </body>
