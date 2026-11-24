@@ -23,8 +23,7 @@
   },
   "devDependencies": {
     "@capacitor/cli": "^6.2.0",
-    "@fontsource/cormorant-garamond": "^5.0.0",
-    "@fontsource/jetbrains-mono": "^5.0.0",
-    "@fontsource/manrope": "^5.0.0"
+    "@fontsource/ibm-plex-sans": "^5.0.0",
+    "@fontsource/jetbrains-mono": "^5.0.0"
   }
 }

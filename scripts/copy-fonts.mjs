@@ -10,8 +10,7 @@ const out = path.join(root, 'www', 'fonts');
 
 // Mismos archivos que declara www/css/fonts.css
 const WANTED = [
-  { pkg: 'cormorant-garamond', weights: [600, 700] },
-  { pkg: 'manrope', weights: [400, 600] },
+  { pkg: 'ibm-plex-sans', weights: [400, 600, 700] },
   { pkg: 'jetbrains-mono', weights: [400] },
 ];
 

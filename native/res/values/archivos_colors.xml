@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- fondo de la app y barra superior, iguales a los colores background y surface del diseño -->
-    <color name="archivos_bg">#F8F8F3</color>
-    <color name="archivos_surface">#EBECE0</color>
-    <color name="archivos_icon_bg">#7A570E</color>
+    <color name="archivos_bg">#F3F9FC</color>
+    <color name="archivos_surface">#FFFFFF</color>
+    <color name="archivos_icon_bg">#006E93</color>
     <bool name="archivos_light_bars">true</bool>
 </resources>

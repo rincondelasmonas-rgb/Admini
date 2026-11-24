@@ -16,7 +16,7 @@ Administrador de archivos completo para Android (Capacitor 6). Todo es local: si
 
 ## Diseño
 
-Estilo "Fernway": calmado y editorial. Paleta cálida (marfil, oliva y dorado oscuro) en modo claro y oscuro automáticos, esquinas cuadradas, sin sombras (la jerarquía sale de líneas de 1px y de la superficie sobre el fondo), títulos en Cormorant Garamond y el resto en Manrope. Todos los valores son variables al inicio de `www/css/styles.css`.
+Estilo "Fernway" azul: calmado, técnico y confiable. Paleta azul petróleo sobre fondos casi blancos, en modo claro y oscuro automáticos, esquinas de 2, 4 y 8 px, tres niveles de sombra suave, controles de 40px y todo en IBM Plex Sans (JetBrains Mono para cifras y el editor). Todos los valores son variables al inicio de `www/css/styles.css`.
 
 Las tipografías viajan dentro de la app: `npm install` las copia a `www/fonts` (`npm run fonts` para repetirlo). Si faltan, se usan las del sistema.
 
