@@ -14,6 +14,12 @@ Administrador de archivos completo para Android (Capacitor 6). Todo es local: si
 - Tema claro/oscuro automático.
 - **Migración**: si usabas la versión 1 (bóveda interna), sus archivos pasan a `Documents/Archivos` y lo que estaba en su papelera va a la nueva.
 
+## Diseño
+
+Estilo "Fernway": calmado y editorial. Paleta cálida (marfil, oliva y dorado oscuro) en modo claro y oscuro automáticos, esquinas cuadradas, sin sombras (la jerarquía sale de líneas de 1px y de la superficie sobre el fondo), títulos en Cormorant Garamond y el resto en Manrope. Todos los valores son variables al inicio de `www/css/styles.css`.
+
+Las tipografías viajan dentro de la app: `npm install` las copia a `www/fonts` (`npm run fonts` para repetirlo). Si faltan, se usan las del sistema.
+
 ## Permiso
 
 La primera vez pide "Acceso a todos los archivos" (Android 11+): toca **Dar permiso**, activa *Permitir acceso para gestionar todos los archivos* y vuelve a la app. En Android 10 es el permiso de almacenamiento normal.

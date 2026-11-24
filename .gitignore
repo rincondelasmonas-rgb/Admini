@@ -4,3 +4,4 @@ dist/
 *.jks
 *.keystore
 .DS_Store
+www/fonts/

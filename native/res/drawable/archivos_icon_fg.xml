@@ -4,11 +4,12 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- carpeta de esquinas rectas, en los tonos del diseño (marfil sobre dorado oscuro) -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M30,38 Q30,34 34,34 L47,34 L53,41 L74,41 Q78,41 78,45 L78,70 Q78,74 74,74 L34,74 Q30,74 30,70 Z" />
+        android:fillColor="#F8F8F3"
+        android:pathData="M30,34 L50,34 L56,41 L78,41 L78,74 L30,74 Z" />
     <path
-        android:fillColor="#4F6BED"
+        android:fillColor="#7A570E"
         android:fillAlpha="0.28"
-        android:pathData="M30,50 L78,50 L78,70 Q78,74 74,74 L34,74 Q30,74 30,70 Z" />
+        android:pathData="M30,50 L78,50 L78,74 L30,74 Z" />
 </vector>
