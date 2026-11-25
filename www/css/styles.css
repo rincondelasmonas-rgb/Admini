@@ -704,8 +704,8 @@ body.fab-on .snack, body.bar-on .snack { bottom: calc(var(--sab) + 84px); }
 .tile-size { font-family: var(--font-mono); font-size: 0.66rem; color: var(--color-muted); }
 
 /* ------------------------------------------------------------ vista previa rápida */
-.mini { position: absolute; left: calc(var(--sal) + 12px); right: calc(var(--sar) + 12px); bottom: calc(var(--sab) + 12px); z-index: 7; animation: mini-in 0.28s var(--ease); }
-body.nav-on .mini { bottom: calc(var(--sab) + 80px); }
+.mini { flex: none; position: relative; margin: 0 12px 8px; z-index: 7; animation: mini-in 0.28s var(--ease); }
+body:not(.nav-on) .mini { margin-bottom: calc(var(--sab) + 8px); }
 .mini-card { display: flex; align-items: center; gap: 12px; padding: 10px; background: var(--color-surface); border: var(--border-width) solid var(--color-border); border-radius: 18px; box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.45); }
 .mini-pv { position: relative; width: 96px; height: 96px; flex: none; border-radius: 14px; overflow: hidden; display: flex; align-items: center; justify-content: center; color: rgb(var(--t)); background: rgba(var(--t), 0.14); cursor: pointer; }
 .mini-pv img, .mini-pv video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
@@ -718,7 +718,6 @@ body.nav-on .mini { bottom: calc(var(--sab) + 80px); }
 .mini-actions { display: flex; flex-direction: column; gap: 2px; }
 .mini-actions .icon-btn { width: 40px; height: 40px; }
 @keyframes mini-in { from { opacity: 0; transform: translateY(16px) scale(0.97); } }
-body.mini-on .content { padding-bottom: 150px; }
 
 /* ------------------------------------------------------------ barra inferior Carpetas | Inicio */
 .bnav { flex: none; display: flex; gap: 8px; padding: 8px 12px calc(var(--sab) + 8px); background: var(--color-surface); border-top: var(--border-width) solid var(--color-border); z-index: 6; }

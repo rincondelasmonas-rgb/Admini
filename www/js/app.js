@@ -722,6 +722,9 @@ function showMini(e) {
     <div class="mini-actions"><button type="button" class="icon-btn" data-mini="open" aria-label="Abrir">${icon('open')}</button><button type="button" class="icon-btn" data-mini="share" aria-label="Compartir">${icon('share')}</button><button type="button" class="icon-btn" data-mini="close" aria-label="Cerrar vista previa">${icon('x')}</button></div></div>`;
   el.classList.remove('hidden');
   document.body.classList.add('mini-on');
+  // la vista previa empuja el contenido hacia arriba: si lo tocado quedó tapado, se acerca para verlo
+  const card = document.querySelector(`#view [data-recent="${CSS.escape(e.path)}"], #view [data-big="${CSS.escape(e.path)}"]`);
+  if (card) card.scrollIntoView({ block: 'nearest' });
 }
 
 function tapHomeItem(path) {
