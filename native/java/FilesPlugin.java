@@ -1389,6 +1389,29 @@ public class FilesPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void categorySizes(PluginCall call) {
+        async(call, c -> {
+            JSObject res = new JSObject();
+            for (String type : new String[]{"images", "videos", "audio", "docs", "archives", "apks"}) {
+                String[] s = selectionFor(type);
+                String[] args = new String[s.length - 1];
+                System.arraycopy(s, 1, args, 0, args.length);
+                long total = 0;
+                Bundle b = new Bundle();
+                b.putString(ContentResolver.QUERY_ARG_SQL_SELECTION, s[0]);
+                if (args.length > 0) b.putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args);
+                try (Cursor cur = getContext().getContentResolver().query(MediaStore.Files.getContentUri("external"), new String[]{MediaStore.Files.FileColumns.SIZE}, b, null)) {
+                    if (cur != null) while (cur.moveToNext()) total += cur.getLong(0);
+                } catch (Exception ignored) {
+                    // sin dato para esta categoría
+                }
+                res.put(type, total);
+            }
+            c.resolve(res);
+        });
+    }
+
+    @PluginMethod
     public void recent(PluginCall call) {
         async(call, c -> {
             int limit = c.getData().optInt("limit", 80);

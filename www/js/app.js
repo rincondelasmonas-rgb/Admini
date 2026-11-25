@@ -34,7 +34,7 @@ const GRID_ROUTES = new Set(['folder', 'cat', 'recent', 'large', 'search']);
 // ---------------------------------------------------------------- ajustes y favoritos
 const DEFAULTS = {
   showHidden: false, foldersFirst: true, view: 'list', sortKey: 'name', sortDir: 'asc', useTrash: true, trashDays: 30,
-  theme: 'auto', textSize: 100, density: 'compact', thumbs: true, startIn: 'home', recentCount: 8,
+  theme: 'auto', textSize: 100, density: 'compact', thumbs: true, startIn: 'home', recentCount: 8, advanced: false,
 };
 const OPTIONS = {
   theme: ['auto', 'light', 'dark'], textSize: [90, 100, 115, 130], density: ['compact', 'cozy'], startIn: ['home', 'storage'],
@@ -42,6 +42,7 @@ const OPTIONS = {
 };
 
 // aplica tema, tamaño de texto y densidad al documento
+const effectiveDark = () => S.settings.theme === 'dark' || (S.settings.theme === 'auto' && !!window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
 function applyAppearance() {
   const st = S.settings;
   const root = document.documentElement;
@@ -49,6 +50,7 @@ function applyAppearance() {
   else root.removeAttribute('data-theme');
   root.style.fontSize = `${st.textSize}%`;
   document.body.classList.toggle('dense', st.density === 'compact');
+  document.body.classList.toggle('adv', !!st.advanced);
   const dark = st.theme === 'dark' || (st.theme === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
   document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.remove());
   const m = document.createElement('meta');
@@ -62,7 +64,7 @@ function loadSettings() {
     const raw = JSON.parse(localStorage.getItem('archivos.settings') || '{}');
     const out = { ...DEFAULTS, ...raw };
     for (const k of Object.keys(OPTIONS)) if (!OPTIONS[k].includes(out[k])) out[k] = DEFAULTS[k];
-    for (const k of ['showHidden', 'foldersFirst', 'useTrash', 'thumbs']) if (typeof out[k] !== 'boolean') out[k] = DEFAULTS[k];
+    for (const k of ['showHidden', 'foldersFirst', 'useTrash', 'thumbs', 'advanced']) if (typeof out[k] !== 'boolean') out[k] = DEFAULTS[k];
     return out;
   } catch (e) {
     return { ...DEFAULTS };
@@ -96,6 +98,7 @@ const S = {
   settings: loadSettings(), favs: loadFavs(),
   groups: [], query: '', truncated: false, searching: false, searchSeq: 0, searchOps: [], searchTimer: null,
   busy: false, version: '',
+  catSizes: null, topFiles: [], folderGroups: [], exp: { space: false, top: false }, mini: null,
 };
 let suppressClick = false;
 let observer = null;
@@ -168,6 +171,10 @@ async function loadHome(seq) {
     Files.categoryCounts().then((c) => { S.counts = c; }),
     Files.recent({ limit: Math.max(S.settings.recentCount, 1) }).then((r) => { S.homeRecent = r.entries; }),
     Files.trashList().then((r) => { S.trashInfo = { count: r.entries.length, size: r.entries.reduce((s, t) => s + (t.size || 0), 0) }; }),
+    ...(S.settings.advanced ? [
+      Files.categorySizes().then((r) => { S.catSizes = r; }),
+      Files.largest({ minSize: 1, limit: 12 }).then((r) => { S.topFiles = r.entries; }),
+    ] : []),
   ];
   for (const j of jobs) {
     j.catch((e) => console.error(e)).finally(() => {
@@ -215,6 +222,20 @@ async function load() {
       case 'trash': {
         const res = await Files.trashList();
         if (seq === S.seq) S.entries = res.entries.map(toTrashEntry).sort((a, b) => b.deletedAt - a.deletedAt);
+        break;
+      }
+      case 'folders': {
+        const groups = [];
+        for (const v of S.volumes) {
+          const res = await Files.list({ path: v.path, showHidden: S.settings.showHidden });
+          groups.push({ vol: v, dirs: res.entries.filter((e) => e.dir).sort((a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base', numeric: true })) });
+        }
+        let favs = [];
+        if (S.favs.length) favs = (await Files.existsMany({ paths: S.favs })).existing;
+        if (seq === S.seq) {
+          S.folderGroups = groups;
+          S.favExisting = favs;
+        }
         break;
       }
       case 'settings': {
@@ -351,6 +372,7 @@ function titleOf() {
     case 'clean': return 'Limpieza';
     case 'dups': return 'Duplicados';
     case 'settings': return 'Ajustes';
+    case 'folders': return 'Carpetas';
     default: return 'Archivos';
   }
 }
@@ -369,7 +391,11 @@ function renderTopbar() {
   if (n === 'home') {
     const v = S.volumes[0];
     const sub = v ? `${formatSize(v.total - v.free)} usados de ${formatSize(v.total)}` : '';
-    tb.innerHTML = `<div class="tb-row"><div class="tb-title"><h1>Archivos</h1><p class="tb-sub">${esc(sub)}</p></div>${tbBtn('search', 'search', 'Buscar')}${tbBtn('settings', 'settings', 'Ajustes')}</div>`;
+    tb.innerHTML = `<div class="tb-row"><div class="tb-title"><h1>Archivos</h1><p class="tb-sub">${esc(sub)}</p></div>${tbBtn('search', 'search', 'Buscar')}${tbBtn('theme', effectiveDark() ? 'moon' : 'sun', effectiveDark() ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro')}${tbBtn('settings', 'settings', 'Ajustes')}</div>`;
+    return;
+  }
+  if (n === 'folders') {
+    tb.innerHTML = `<div class="tb-row"><div class="tb-title"><h1>Carpetas</h1><p class="tb-sub">${esc(countText(S.folderGroups.reduce((t, g) => t + g.dirs.length, 0), 'carpeta', 'carpetas'))}</p></div>${tbBtn('search', 'search', 'Buscar')}${tbBtn('theme', effectiveDark() ? 'moon' : 'sun', effectiveDark() ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro')}${tbBtn('settings', 'settings', 'Ajustes')}</div>`;
     return;
   }
   if (n === 'search') {
@@ -540,6 +566,11 @@ function renderView() {
     root.innerHTML = gateHtml();
     return;
   }
+  if (n !== 'home' && S.mini) closeMini();
+  if (n === 'folders') {
+    root.innerHTML = foldersHtml();
+    return;
+  }
   if (n === 'home') {
     root.innerHTML = homeHtml();
     return;
@@ -598,6 +629,7 @@ function homeHtml() {
       (e) => `<button type="button" class="rc" data-recent="${esc(e.path)}">${thumbHtml(e)}<span class="rc-name">${esc(e.name)}</span><span class="rc-sub">${esc(formatSize(e.size))} · ${esc(formatDate(e.mtime))}</span></button>`
     ).join('')
     : '';
+  if (S.settings.advanced) return advHomeHtml(vols, cats, recent);
   const ti = S.trashInfo;
   return `<div class="home">
     <section class="vols">${vols}</section>
@@ -610,6 +642,101 @@ function homeHtml() {
       <button type="button" class="tool" data-tool="clean"><span class="tool-ic">${icon('clean')}</span><span class="tool-meta"><b>Limpieza</b><small>Archivos grandes y duplicados</small></span>${icon('chevron')}</button>
       <button type="button" class="tool" data-tool="settings"><span class="tool-ic">${icon('settings')}</span><span class="tool-meta"><b>Ajustes</b><small>Tema, texto, orden, papelera, permisos</small></span>${icon('chevron')}</button>
     </section></div>`;
+}
+
+
+// --- portada del diseño avanzado
+function spaceRows() {
+  const v = S.volumes[0];
+  if (!S.catSizes || !v) return null;
+  const used = Math.max(1, v.total - v.free);
+  const rows = CATS.map((c) => ({ label: c.label, icon: c.icon, cls: c.cls, size: S.catSizes[c.id] || 0 }));
+  const sum = rows.reduce((n, r) => n + r.size, 0);
+  rows.push({ label: 'Sistema y otros', icon: 'file', cls: 'c-file', size: Math.max(0, used - sum) });
+  return rows.filter((r) => r.size > 0).sort((a, b) => b.size - a.size).map((r) => ({ ...r, pct: Math.min(100, Math.round((r.size / used) * 1000) / 10) }));
+}
+
+function expHtml(id, ic, title, sub, body) {
+  const open = !!S.exp[id];
+  return `<section class="exp${open ? ' open' : ''}"><button type="button" class="exp-head" data-exp="${id}" aria-expanded="${open}"><span class="exp-ic">${icon(ic)}</span><span class="exp-meta"><b>${title}</b><small>${sub}</small></span><span class="exp-chev">${icon('expand')}</span></button><div class="exp-body"><div class="exp-inner"><div class="exp-pad">${body}</div></div></div></section>`;
+}
+
+function advHomeHtml(vols, cats, recent) {
+  const rows = spaceRows();
+  const spaceBody = rows
+    ? `<div class="stack">${rows.map((r, i) => `<i class="${r.cls}" style="--w:${Math.max(r.pct, 1.5)}%;--d:${i * 90}ms"></i>`).join('')}</div>${rows.map((r, i) => `<div class="sp-row ${r.cls}"><span class="sp-ic">${icon(r.icon)}</span><span class="sp-name">${esc(r.label)}</span><span class="sp-size">${esc(formatSize(r.size))} · ${r.pct < 1 ? "<1" : Math.round(r.pct)}%</span><span class="sp-bar"><i style="--w:${Math.max(r.pct, 1.5)}%;--d:${i * 90}ms"></i></span></div>`).join('')}`
+    : '<p class="rc-empty">Calculando…</p>';
+  const v = S.volumes[0];
+  const spaceSub = v ? `${formatSize(v.total - v.free)} usados · por tipo de archivo` : 'Por tipo de archivo';
+  const top = S.topFiles || [];
+  const topBody = top.length
+    ? `<div class="tiles">${top.map((e) => `<button type="button" class="tile" data-big="${esc(e.path)}">${thumbHtml(e)}<span class="tile-name">${esc(e.name)}</span><span class="tile-size">${esc(formatSize(e.size))}</span></button>`).join('')}</div>`
+    : '<p class="rc-empty">Calculando…</p>';
+  const topSub = top.length ? `Los ${top.length} más pesados · toca uno para ver` : 'Archivos y juegos más pesados';
+  return `<div class="home adv-home">
+    <section class="vols">${vols}</section>
+    ${expHtml('space', 'chart', 'Espacio ocupado', esc(spaceSub), spaceBody)}
+    ${expHtml('top', 'big', 'Lo que más ocupa', esc(topSub), topBody)}
+    ${S.settings.recentCount > 0 ? `<div class="section-head"><h2 class="section-title">Recientes</h2><button type="button" class="btn text" data-a="seerecent">Ver todo</button></div>${recent ? `<section class="rc-strip">${recent}</section>` : '<p class="rc-empty">Aún no hay archivos recientes.</p>'}` : ''}
+    <h2 class="section-title">Categorías</h2><section class="cat-grid">${cats}</section>
+  </div>`;
+}
+
+// --- pantalla de carpetas (diseño avanzado)
+function foldHtml(path, name, count) {
+  return `<button type="button" class="fold" data-quick="${esc(path)}">${icon('folder')}<span class="fold-meta"><b>${esc(name)}</b><small>${count == null ? '' : esc(countText(count, 'elemento', 'elementos'))}</small></span></button>`;
+}
+function foldersHtml() {
+  if (S.loading && !S.folderGroups.length) return '<div class="empty"><p>Cargando…</p></div>';
+  const favs = (S.favExisting || []).map((p) => foldHtml(p, baseName(p), null)).join('');
+  const groups = S.folderGroups
+    .map((g) => `<h2 class="section-title">${esc(g.vol.label)} · ${esc(countText(g.dirs.length, 'carpeta', 'carpetas'))}</h2>${g.dirs.length ? `<section class="fold-grid">${g.dirs.map((d) => foldHtml(d.path, d.name, d.count || 0)).join('')}</section>` : '<p class="rc-empty">No hay carpetas aquí.</p>'}`)
+    .join('');
+  return `<div class="home">${favs ? `<h2 class="section-title">Favoritas</h2><section class="fold-grid">${favs}</section>` : ''}${groups}</div>`;
+}
+
+// --- vista previa rápida (un toque) y apertura completa (doble toque)
+let lastTap = { path: '', t: 0 };
+const homeItem = (path) => S.homeRecent.find((x) => x.path === path) || S.topFiles.find((x) => x.path === path);
+
+function closeMini() {
+  S.mini = null;
+  const el = $('#mini');
+  if (el) {
+    el.classList.add('hidden');
+    el.innerHTML = '';
+  }
+  document.body.classList.remove('mini-on');
+}
+
+function showMini(e) {
+  S.mini = e;
+  const k = kind(e);
+  const url = esc(fileUrl(e.path));
+  let media = icon(k);
+  if (k === 'image' && e.size <= 40 * 1024 * 1024) media = `<img src="${url}" alt="">`;
+  else if (k === 'video') media = `<video src="${url}" muted playsinline preload="metadata"></video>`;
+  const el = $('#mini');
+  el.innerHTML = `<div class="mini-card"><div class="mini-pv c-${k}" data-minipv>${media}</div>
+    <div class="mini-meta"><b>${esc(e.name)}</b><small>${esc(formatSize(e.size))} · ${esc(formatDate(e.mtime))}</small>${k === 'audio' ? `<audio src="${url}" controls preload="none"></audio>` : '<small class="mini-hint">Toca dos veces para abrir</small>'}</div>
+    <div class="mini-actions"><button type="button" class="icon-btn" data-mini="open" aria-label="Abrir">${icon('open')}</button><button type="button" class="icon-btn" data-mini="share" aria-label="Compartir">${icon('share')}</button><button type="button" class="icon-btn" data-mini="close" aria-label="Cerrar vista previa">${icon('x')}</button></div></div>`;
+  el.classList.remove('hidden');
+  document.body.classList.add('mini-on');
+}
+
+function tapHomeItem(path) {
+  const e = homeItem(path);
+  if (!e) return;
+  if (!S.settings.advanced) return void openEntry(e, S.homeRecent);
+  const now = Date.now();
+  if (lastTap.path === path && now - lastTap.t < 400) {
+    lastTap = { path: '', t: 0 };
+    closeMini();
+    return void openEntry(e, S.homeRecent.includes(e) ? S.homeRecent : S.topFiles);
+  }
+  lastTap = { path, t: now };
+  showMini(e);
+  return undefined;
 }
 
 function cleanHtml() {
@@ -638,7 +765,18 @@ function settingsHtml() {
   const s = S.settings;
   const ti = S.trashInfo;
   const trashTxt = ti ? (ti.count ? `${countText(ti.count, 'elemento', 'elementos')} · ${formatSize(ti.size)}` : 'La papelera está vacía') : '';
+  const tools = s.advanced
+    ? `<h2 class="section-title">Herramientas</h2><section class="tools">
+      <button type="button" class="tool" data-tool="trash"><span class="tool-ic">${icon('trash')}</span><span class="tool-meta"><b>Papelera</b><small>${esc(trashTxt)}</small></span>${icon('chevron')}</button>
+      <button type="button" class="tool" data-tool="clean"><span class="tool-ic">${icon('clean')}</span><span class="tool-meta"><b>Limpieza</b><small>Archivos grandes y duplicados</small></span>${icon('chevron')}</button>
+    </section>`
+    : '';
   return `<div class="settings">
+    <h2 class="section-title">Diseño</h2>
+    <section class="card">
+      ${sw('advanced', s.advanced, 'Diseño avanzado', 'Portada futurista con espacio ocupado, vista previa rápida y barra inferior Carpetas | Inicio')}
+    </section>
+    ${tools}
     <h2 class="section-title">Apariencia</h2>
     <section class="card">
       <div class="set-row static"><span class="set-meta"><b>Tema</b><small>Automático sigue al del teléfono</small></span>${seg('theme', s.theme, [['auto', 'Automático'], ['light', 'Claro'], ['dark', 'Oscuro']])}</div>
@@ -700,6 +838,13 @@ function renderBars() {
   const fabOn = n === 'folder' && !S.selecting && !clipOn && !S.error;
   $('#fab').classList.toggle('hidden', !fabOn);
   document.body.classList.toggle('fab-on', fabOn);
+  const navOn = !!S.settings.advanced && S.access === true && !S.selecting && !clipOn;
+  $('#bnav').classList.toggle('hidden', !navOn);
+  document.body.classList.toggle('nav-on', navOn);
+  if (navOn) {
+    const inFolders = n === 'folders' || n === 'folder';
+    $('#bnav').querySelectorAll('[data-nav]').forEach((b) => b.setAttribute('aria-current', String(b.dataset.nav === 'folders' ? inFolders : n === 'home')));
+  }
   document.body.classList.toggle('bar-on', clipOn || S.selecting);
 }
 
@@ -1181,6 +1326,11 @@ function setSetting(key, value) {
   } else if (key === 'trashDays') {
     purgeTrash().catch(() => {});
     renderAll();
+  } else if (key === 'advanced') {
+    applyAppearance();
+    closeMini();
+    if (!value && rname() === 'folders') go({ name: 'home' }, { push: false });
+    else renderAll();
   } else if (key === 'recentCount') {
     renderAll();
     if (value > 0) Files.recent({ limit: value }).then((r) => { S.homeRecent = r.entries; }).catch(() => {});
@@ -1388,8 +1538,16 @@ function wire() {
       if (rname() === 'trash') return void openTrashMenu(ent);
       return void openEntry(ent, S.view);
     }
-    const rec = t.closest('[data-recent]');
-    if (rec) return void openEntry(S.homeRecent.find((x) => x.path === rec.dataset.recent), S.homeRecent);
+    const ex = t.closest('[data-exp]');
+    if (ex) {
+      const id = ex.dataset.exp;
+      S.exp[id] = !S.exp[id];
+      ex.setAttribute('aria-expanded', String(S.exp[id]));
+      ex.closest('.exp').classList.toggle('open', S.exp[id]);
+      return undefined;
+    }
+    const rec = t.closest('[data-recent],[data-big]');
+    if (rec) return void tapHomeItem(rec.dataset.recent || rec.dataset.big);
     const vol = t.closest('[data-vol]');
     if (vol) return openFolder(vol.dataset.vol);
     const cat = t.closest('[data-cat]');
@@ -1409,6 +1567,34 @@ function wire() {
     return undefined;
   });
 
+  $('#bnav').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-nav]');
+    if (!b) return;
+    const to = b.dataset.nav;
+    if (rname() === to) {
+      $('#content').scrollTop = 0;
+      return;
+    }
+    S.history = [];
+    go({ name: to }, { push: false });
+  });
+  $('#mini').addEventListener('click', (e) => {
+    const t = e.target;
+    const act = t.closest('[data-mini]');
+    const cur = S.mini;
+    if (!cur) return;
+    if (act) {
+      const a = act.dataset.mini;
+      if (a === 'close') return closeMini();
+      if (a === 'share') return void guarded(() => doShare([cur]));
+      if (a === 'open') {
+        closeMini();
+        return void openEntry(cur, S.homeRecent.includes(cur) ? S.homeRecent : S.topFiles);
+      }
+    }
+    if (t.closest('audio, video') || !t.closest('[data-minipv]')) return;
+    tapHomeItem(cur.path);
+  });
   $('#topbar').addEventListener('click', (e) => {
     const a = e.target.closest('[data-a]');
     if (a) handleTopAction(a.dataset.a);
@@ -1512,6 +1698,12 @@ function handleTopAction(a) {
       renderAll();
       toast('Ajustes restablecidos');
     });
+    case 'theme': {
+      setSetting('theme', effectiveDark() ? 'light' : 'dark');
+      const ic = document.querySelector('#topbar [data-a="theme"] .ic');
+      if (ic) ic.classList.add('spin');
+      return undefined;
+    }
     case 'grant': return void grantAccess();
     case 'appsettings': return void Files.openAppSettings().catch(() => {});
     default: return undefined;

@@ -384,6 +384,11 @@ export function createMock({ granted = true, seed = true } = {}) {
       for (const t of ['images', 'videos', 'audio', 'docs', 'archives', 'apks']) out[t] = (await api.category({ type: t, limit: 1e9 })).entries.length;
       return out;
     },
+    async categorySizes() {
+      const out = {};
+      for (const t of ['images', 'videos', 'audio', 'docs', 'archives', 'apks']) out[t] = (await api.category({ type: t, limit: 1e9 })).entries.reduce((n, e) => n + (e.size || 0), 0);
+      return out;
+    },
     async recent({ limit = 80 }) {
       return { entries: filesBy(() => true).sort((a, b) => b.mtime - a.mtime).slice(0, limit) };
     },
